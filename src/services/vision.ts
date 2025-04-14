@@ -1,0 +1,141 @@
+import { GoogleGenerativeAI } from '@google/generative-ai';
+
+const GEMINI_API_KEY = 'YOUR API KEY HERE';
+
+const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+
+// Helper function to translate hazards to Malayalam and Hindi
+const translateHazardsToLanguage = (hazards: string[], language: string): string[] => {
+  const hazardTranslations: { [key: string]: { ml: string; hi: string } } = {
+    'stairs': { ml: 'പടികൾ', hi: 'सीढ़ियां' },
+    'step': { ml: 'പടി', hi: 'सीढ़ी' },
+    'uneven surface': { ml: 'അസമമായ പ്രതലം', hi: 'असमान सतह' },
+    'obstacle': { ml: 'തടസ്സം', hi: 'बाधा' },
+    'moving object': { ml: 'ചലിക്കുന്ന വസ്തു', hi: 'चलती वस्तु' },
+    'vehicle': { ml: 'വാഹനം', hi: 'वाहन' },
+    'person': { ml: 'വ്യക്തി', hi: 'व्यक्ति' },
+    'crowd': { ml: 'ജനക്കൂട്ടം', hi: 'भीड़' },
+    'water': { ml: 'വെള്ളം', hi: 'पानी' },
+    'hole': { ml: 'കുഴി', hi: 'गड्ढा' },
+    'construction': { ml: 'നിർമ്മാണം', hi: 'निर्माण' },
+    'wet floor': { ml: 'നനഞ്ഞ തറ', hi: 'गीला फर्श' },
+    'traffic': { ml: 'ഗതാഗതം', hi: 'यातायात' },
+    'door': { ml: 'വാതിൽ', hi: 'दरवाजा' },
+    'wall': { ml: 'ചുമർ', hi: 'दीवार' },
+    'furniture': { ml: 'ഫർണിച്ചർ', hi: 'फर्नीचर' },
+    'glass': { ml: 'ഗ്ലാസ്', hi: 'कांच' },
+    'sharp object': { ml: 'മൂർച്ചയുള്ള വസ്തു', hi: 'तेज वस्तु' },
+    'electric': { ml: 'വൈദ്യുതി', hi: 'बिजली' },
+    'hot surface': { ml: 'ചൂടുള്ള പ്രതലം', hi: 'गर्म सतह' }
+  };
+
+  return hazards.map(hazard => {
+    const lowerHazard = hazard.toLowerCase();
+    for (const [eng, translations] of Object.entries(hazardTranslations)) {
+      if (lowerHazard.includes(eng)) {
+        return translations[language as 'ml' | 'hi'] || hazard;
+      }
+    }
+    return hazard; // Return original if no translation found
+  });
+};
+
+export async function analyzeImage(base64Image: string, language: string = 'en') {
+  try {
+    if (!base64Image || !base64Image.includes('base64')) {
+      throw new Error('Invalid image data provided');
+    }
+
+    const imageData = base64Image.split(',')[1];
+    if (!imageData) {
+      throw new Error('Invalid base64 image format');
+    }
+
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    
+    // First, analyze for hazards in English for consistent detection
+    const hazardResult = await model.generateContent([
+      'Analyze this image for any potential hazards or dangers that a visually impaired person should be warned about. Focus on immediate threats like weapons, vehicles, obstacles, or dangerous situations. Respond with ONLY the hazards in a comma-separated list. If no hazards are found, respond with "NONE".',
+      { inlineData: { data: imageData, mimeType: 'image/jpeg' } }
+    ]);
+    
+    const hazardText = hazardResult.response.text();
+    const hazards = hazardText === 'NONE' ? [] : hazardText.split(',').map(h => h.trim());
+
+    // Get scene description with specific language instructions
+    let descriptionPrompt = 'Describe this scene in a single, clear sentence (50 words or less). Focus on the main elements and their arrangement.';
+    
+    if (language === 'ml') {
+      descriptionPrompt = `Provide a natural Malayalam language description of this scene in a single sentence (50 words or less). Use proper Malayalam grammar and natural phrasing. Focus on describing the main elements and their arrangement in a way that sounds natural to Malayalam speakers. Respond ONLY in Malayalam script.`;
+    } else if (language === 'hi') {
+      descriptionPrompt = `इस दृश्य का एक प्राकृतिक हिंदी भाषा में वर्णन करें (50 शब्दों से कम में)। उचित हिंदी व्याकरण और प्राकृतिक वाक्य रचना का उपयोग करें। मुख्य तत्वों और उनकी व्यवस्था का वर्णन करें। केवल देवनागरी लिपि में उत्तर दें।`;
+    }
+
+    const descResult = await model.generateContent([
+      descriptionPrompt,
+      { inlineData: { data: imageData, mimeType: 'image/jpeg' } }
+    ]);
+    const description = descResult.response.text().split(/[.!?]/, 1)[0].trim();
+
+    // Extract objects from the description (keep in English for consistency)
+    const commonObjects = ['person', 'chair', 'table', 'computer', 'phone', 'book', 'window', 'door', 'wall', 'desk', 'lamp', 'screen', 'monitor', 'keyboard', 'mouse', 'headphone', 'camera', 'wire', 'cable', 'jacket', 'shirt', 'pants', 'shoes'];
+    const objectMatches = description.toLowerCase().match(new RegExp(`\\b(${commonObjects.join('|')})\\b`, 'g')) || [];
+    const objects = [...new Set(objectMatches)];
+
+    return {
+      objects,
+      description,
+      hazards: language === 'en' ? hazards : translateHazardsToLanguage(hazards, language)
+    };
+  } catch (error) {
+    console.error('Error analyzing image:', error);
+    throw error;
+  }
+}
+
+export async function analyzeForNavigation(base64Image: string, language: string = 'en') {
+  try {
+    if (!base64Image || !base64Image.includes('base64')) {
+      throw new Error('Invalid image data provided');
+    }
+
+    const imageData = base64Image.split(',')[1];
+    if (!imageData) {
+      throw new Error('Invalid base64 image format');
+    }
+
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    
+    // First, analyze for hazards in English for consistent detection
+    const hazardResult = await model.generateContent([
+      'Analyze this image for any potential hazards or dangers that a visually impaired person should be warned about while navigating. Focus on immediate obstacles, steps, uneven surfaces, or moving objects. Respond with ONLY the hazards in a comma-separated list. If no hazards are found, respond with "NONE".',
+      { inlineData: { data: imageData, mimeType: 'image/jpeg' } }
+    ]);
+    
+    const hazardText = hazardResult.response.text();
+    const hazards = hazardText === 'NONE' ? [] : hazardText.split(',').map(h => h.trim());
+
+    // Get navigation guidance with specific language instructions
+    let navigationPrompt = 'Analyze this scene and provide clear, concise navigation guidance for a visually impaired person. Include information about safe paths, obstacles to avoid, and suggested directions. Keep it under 50 words and focus on immediate, actionable guidance.';
+    
+    if (language === 'ml') {
+      navigationPrompt = `Provide natural Malayalam language navigation guidance for a visually impaired person. Include information about safe paths, obstacles to avoid, and suggested directions. Use proper Malayalam grammar and natural phrasing. Keep it under 50 words and respond ONLY in Malayalam script.`;
+    } else if (language === 'hi') {
+      navigationPrompt = `एक दृष्टिबाधित व्यक्ति के लिए प्राकृतिक हिंदी भाषा में नेविगेशन मार्गदर्शन प्रदान करें। सुरक्षित रास्तों, बचने योग्य बाधाओं और सुझाए गए दिशाओं की जानकारी शामिल करें। 50 शब्दों से कम में और केवल देवनागरी लिपि में उत्तर दें।`;
+    }
+
+    const navResult = await model.generateContent([
+      navigationPrompt,
+      { inlineData: { data: imageData, mimeType: 'image/jpeg' } }
+    ]);
+    const navigation = navResult.response.text().split(/[.!?]/, 1)[0].trim();
+
+    return {
+      navigation,
+      hazards: language === 'en' ? hazards : translateHazardsToLanguage(hazards, language)
+    };
+  } catch (error) {
+    console.error('Error analyzing image for navigation:', error);
+    throw error;
+  }
+}
