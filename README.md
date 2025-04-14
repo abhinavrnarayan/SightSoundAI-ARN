@@ -92,6 +92,12 @@ Requires:
 - JavaScript enabled
 - Web Speech API support
 
+## OUTPUT
+
+![alt text](6334340179459950876.jpg)
+![alt text](6334340179459950875.jpg)
+![alt text](6334340179459950874.jpg)
+
 ## Privacy and Security 🔒
 
 - All image processing is done in real-time
