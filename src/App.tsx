@@ -1,11 +1,24 @@
-import React, { useState, useRef, useCallback, useEffect } from 'react';
-import Webcam from 'react-webcam';
-import { Camera, Volume2, StopCircle, Eye, FileText, AlertTriangle, Mic, Navigation2, Languages } from 'lucide-react';
-import SpeechRecognition, { useSpeechRecognition } from 'react-speech-recognition';
-import { analyzeImage, analyzeForNavigation } from './services/vision';
-import { VoiceSettings } from './components/VoiceSettings';
-import { Tab } from './components/Tab';
-import { translations, Language } from './translations';
+import { useState, useRef, useCallback, useEffect } from "react";
+import Webcam from "react-webcam";
+import { trackEvent, updateUserProperties, trackEngagement, trackPerformance, trackError, getSessionInfo } from "./firebase";
+import {
+  Camera,
+  Volume2,
+  StopCircle,
+  Eye,
+  FileText,
+  AlertTriangle,
+  Mic,
+  Navigation2,
+  Languages,
+} from "lucide-react";
+import SpeechRecognition, {
+  useSpeechRecognition,
+} from "react-speech-recognition";
+import { analyzeImage, analyzeForNavigation } from "./services/vision";
+import { VoiceSettings } from "./components/VoiceSettings";
+import { Tab } from "./components/Tab";
+import { translations, Language } from "./translations";
 
 function App() {
   const [isCapturing, setIsCapturing] = useState(false);
@@ -15,118 +28,302 @@ function App() {
     hazards: string[];
     navigation?: string;
   } | null>(null);
-  const [activeTab, setActiveTab] = useState<'description' | 'navigation'>('description');
   const [isSpeaking, setIsSpeaking] = useState(false);
-  const [countdown, setCountdown] = useState<number | null>(null);
   const [isPaused, setIsPaused] = useState(false);
-  const [mode, setMode] = useState<'scene' | 'navigation'>('scene');
-  const [language, setLanguage] = useState<Language>('en');
+  const [mode, setMode] = useState<"scene" | "navigation">("scene");
+  const [language, setLanguage] = useState<Language>("en");
   const webcamRef = useRef<Webcam>(null);
   const speechRef = useRef<SpeechSynthesisUtterance | null>(null);
   const analysisIntervalRef = useRef<number | null>(null);
   const pauseTimeoutRef = useRef<number | null>(null);
+  const imageAnalysisCountRef = useRef<number>(0);
+  const totalSpeakingTimeRef = useRef<number>(0);
+  const speakingStartTimeRef = useRef<number | null>(null);
+  const lastInteractionTimeRef = useRef<number>(Date.now());
 
   const t = translations[language];
 
-  const handleModeSwitch = (newMode: 'scene' | 'navigation') => {
+  const handleModeSwitch = (newMode: "scene" | "navigation") => {
+    const previousMode = mode;
     setMode(newMode);
     speak(t.switchedToMode(newMode), true);
+
+    // Track mode switch in GA
+    trackEvent("mode_switched", {
+      from_mode: previousMode,
+      to_mode: newMode,
+      method: "voice_command",
+      language: language,
+    });
   };
 
   const handleLanguageToggle = () => {
-    const languages: Language[] = ['en', 'hi', 'ml'];
+    const languages: Language[] = ["en", "hi", "ml"];
     const currentIndex = languages.indexOf(language);
     const nextIndex = (currentIndex + 1) % languages.length;
     const newLang = languages[nextIndex];
-    
+
+    const previous = language;
     setLanguage(newLang);
-    localStorage.setItem('language', newLang);
+    localStorage.setItem("language", newLang);
+
+    // Track language change in GA
+    trackEvent("language_changed", {
+      from_language: previous,
+      to_language: newLang,
+      method: "button_click",
+    });
+
+    // Update user property
+    updateUserProperties({ preferred_language: newLang });
   };
 
   useEffect(() => {
-    const savedLang = localStorage.getItem('language') as Language;
-    if (savedLang && ['en', 'ml', 'hi'].includes(savedLang)) {
+    const savedLang = localStorage.getItem("language") as Language;
+    if (savedLang && ["en", "ml", "hi"].includes(savedLang)) {
       setLanguage(savedLang);
+      // Track initial language preference
+      updateUserProperties({ preferred_language: savedLang });
     }
+
+    // Track app initialization with comprehensive metrics
+    const sessionInfo = getSessionInfo();
+    trackEvent("app_initialized", {
+      has_saved_language: !!savedLang,
+      initial_language: savedLang || "en",
+      browser_supports_speech: browserSupportsSpeechRecognition,
+      microphone_available: isMicrophoneAvailable,
+      session_id: sessionInfo.sessionId,
+      device_id: sessionInfo.deviceId,
+    });
+
+    // Track periodic engagement (every 30 seconds)
+    const engagementInterval = setInterval(() => {
+      const timeSinceLastInteraction = Date.now() - lastInteractionTimeRef.current;
+      trackEngagement("periodic_check", {
+        session_duration: sessionInfo.sessionDuration,
+        total_analyses: imageAnalysisCountRef.current,
+        total_speaking_time_ms: totalSpeakingTimeRef.current,
+        time_since_last_interaction_ms: timeSinceLastInteraction,
+        current_mode: mode,
+        current_language: language,
+        is_speaking: isSpeaking,
+        is_listening: listening,
+      });
+    }, 30000);
+
+    // Track session end on page unload
+    const handleBeforeUnload = () => {
+      const finalSessionInfo = getSessionInfo();
+      trackEvent("session_end", {
+        session_duration: finalSessionInfo.sessionDuration,
+        total_analyses: imageAnalysisCountRef.current,
+        total_speaking_time_ms: totalSpeakingTimeRef.current,
+        final_mode: mode,
+        final_language: language,
+      });
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+
+    return () => {
+      clearInterval(engagementInterval);
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
   }, []);
 
   const {
-    transcript,
     listening,
     browserSupportsSpeechRecognition,
-    isMicrophoneAvailable
+    isMicrophoneAvailable,
   } = useSpeechRecognition({
     commands: [
       {
-        command: ['switch to navigation', 'navigation mode', 'enable navigation', 'start navigation', 'begin navigation', 'navigate', 'नेविगेशन', 'नेविगेट', 'നാവിഗേഷൻ', 'നാവിഗേഷൻ മോഡ്'],
-        callback: () => handleModeSwitch('navigation'),
+        command: [
+          "switch to navigation",
+          "navigation mode",
+          "enable navigation",
+          "start navigation",
+          "begin navigation",
+          "navigate",
+          "नेविगेशन",
+          "नेविगेट",
+          "നാവിഗേഷൻ",
+          "നാവിഗേഷൻ മോഡ്",
+        ],
+        callback: () => handleModeSwitch("navigation"),
         isFuzzyMatch: true,
-        fuzzyMatchingThreshold: 0.8
+        fuzzyMatchingThreshold: 0.8,
       },
       {
-        command: ['switch to scene', 'scene mode', 'scene description', 'enable scene', 'start scene', 'describe scene', 'what do you see', 'दृश्य विवरण', 'दृश्य मोड', 'ദൃശ്യ വിവരണം', 'സീൻ മോഡ്'],
-        callback: () => handleModeSwitch('scene'),
+        command: [
+          "switch to scene",
+          "scene mode",
+          "scene description",
+          "enable scene",
+          "start scene",
+          "describe scene",
+          "what do you see",
+          "दृश्य विवरण",
+          "दृश्य मोड",
+          "ദൃശ്യ വിവരണം",
+          "സീൻ മോഡ്",
+        ],
+        callback: () => handleModeSwitch("scene"),
         isFuzzyMatch: true,
-        fuzzyMatchingThreshold: 0.8
+        fuzzyMatchingThreshold: 0.8,
       },
       {
-        command: ['hazards', 'dangers', 'what are the hazards', 'any dangers', 'खतरे', 'कोई खतरा', 'അപകടങ്ങൾ', 'അപകട സാധ്യതകൾ'],
+        command: [
+          "hazards",
+          "dangers",
+          "what are the hazards",
+          "any dangers",
+          "खतरे",
+          "कोई खतरा",
+          "അപകടങ്ങൾ",
+          "അപകട സാധ്യതകൾ",
+        ],
         callback: () => {
           if (analysis?.hazards) {
-            const response = analysis.hazards.length > 0
-              ? t.detectedHazards(analysis.hazards)
-              : t.noHazards;
+            const response =
+              analysis.hazards.length > 0
+                ? t.detectedHazards(analysis.hazards)
+                : t.noHazards;
             speak(response, true);
+
+            // Track voice command for hazards
+            trackEngagement("voice_command", {
+              command: "hazards_query",
+              language: language,
+              hazards_found: analysis.hazards.length > 0,
+              hazard_count: analysis.hazards.length,
+              mode: mode,
+            });
           }
-        }
+        },
       },
       {
-        command: ['switch language', 'change language', 'toggle language', 'भाषा बदलें', 'ഭാഷ മാറ്റുക'],
-        callback: handleLanguageToggle
-      }
-    ]
+        command: [
+          "switch language",
+          "change language",
+          "toggle language",
+          "भाषा बदलें",
+          "ഭാഷ മാറ്റുക",
+        ],
+        callback: handleLanguageToggle,
+      },
+    ],
   });
 
   const videoConstraints = {
-    facingMode: { ideal: 'environment' },
+    facingMode: { ideal: "environment" },
     width: { ideal: window.innerWidth },
     height: { ideal: window.innerHeight },
-    aspectRatio: { ideal: window.innerWidth / window.innerHeight }
+    aspectRatio: { ideal: window.innerWidth / window.innerHeight },
   };
 
   const handleCapture = useCallback(async () => {
     if (!webcamRef.current || isPaused || isSpeaking) return;
-    
+
     setIsCapturing(true);
+    const analysisStartTime = performance.now();
     const imageSrc = webcamRef.current.getScreenshot();
-    
+
     try {
       if (!imageSrc) {
-        console.warn('No image captured from webcam');
+        console.warn("No image captured from webcam");
+        trackError("No image captured from webcam", { mode, language });
         return;
       }
 
-      if (mode === 'navigation') {
+      imageAnalysisCountRef.current += 1;
+      lastInteractionTimeRef.current = Date.now();
+
+      // Track engagement
+      trackEngagement("image_capture", {
+        mode,
+        language,
+        analysis_count: imageAnalysisCountRef.current,
+      });
+
+      if (mode === "navigation") {
         const result = await analyzeForNavigation(imageSrc, language);
-        setAnalysis(prev => ({ ...prev, ...result }));
+        const analysisDuration = Math.round(performance.now() - analysisStartTime);
         
+        setAnalysis((prev) => ({
+          objects: prev?.objects || [],
+          description: prev?.description || "",
+          hazards: result.hazards,
+          navigation: result.navigation,
+        }));
+
+        // Track navigation analysis with performance metrics
+        trackEvent("image_analyzed", {
+          mode: "navigation",
+          language: language,
+          hazards_detected: result.hazards.length,
+          hazard_types: result.hazards.join(","),
+          has_navigation_guidance: !!result.navigation,
+          navigation_length: result.navigation?.length || 0,
+          analysis_duration_ms: analysisDuration,
+          total_analyses: imageAnalysisCountRef.current,
+        });
+
+        // Track performance
+        trackPerformance("navigation_analysis", analysisDuration);
+
         if (!isPaused && !isSpeaking) {
-          speak(result.hazards.length > 0 
-            ? `${t.detectedHazards(result.hazards)}. ${result.navigation}`
-            : result.navigation, false);
+          speak(
+            result.hazards.length > 0
+              ? `${t.detectedHazards(result.hazards)}. ${result.navigation}`
+              : result.navigation,
+            false
+          );
         }
       } else {
         const result = await analyzeImage(imageSrc, language);
-        setAnalysis(result);
+        const analysisDuration = Math.round(performance.now() - analysisStartTime);
         
+        setAnalysis(result);
+
+        // Track scene analysis with performance metrics
+        trackEvent("image_analyzed", {
+          mode: "scene",
+          language: language,
+          hazards_detected: result.hazards.length,
+          hazard_types: result.hazards.join(","),
+          objects_detected: result.objects.length,
+          objects: result.objects.join(","),
+          description_length: result.description.length,
+          analysis_duration_ms: analysisDuration,
+          total_analyses: imageAnalysisCountRef.current,
+        });
+
+        // Track performance
+        trackPerformance("scene_analysis", analysisDuration);
+
         if (!isPaused && !isSpeaking) {
-          speak(result.hazards.length > 0 
-            ? `${t.detectedHazards(result.hazards)}. ${result.description}`
-            : result.description, false);
+          speak(
+            result.hazards.length > 0
+              ? `${t.detectedHazards(result.hazards)}. ${result.description}`
+              : result.description,
+            false
+          );
         }
       }
     } catch (error) {
-      console.error('Error analyzing image:', error);
+      const errorDuration = Math.round(performance.now() - analysisStartTime);
+      console.error("Error analyzing image:", error);
+      
+      // Track error with context
+      trackError(error instanceof Error ? error : new Error(String(error)), {
+        mode,
+        language,
+        analysis_duration_ms: errorDuration,
+        analysis_count: imageAnalysisCountRef.current,
+      });
+      
       speak(t.errorAnalyzing, true);
     } finally {
       setIsCapturing(false);
@@ -140,14 +337,9 @@ function App() {
     analysisIntervalRef.current = window.setInterval(() => {
       if (isPaused || isSpeaking) {
         timeLeft = interval;
-        setCountdown(null);
         return;
       }
 
-      if (timeLeft <= 5) {
-        setCountdown(timeLeft);
-      }
-      
       if (timeLeft <= 0) {
         handleCapture();
         timeLeft = interval;
@@ -182,49 +374,93 @@ function App() {
     }
 
     const voices = window.speechSynthesis.getVoices();
-    const savedVoice = localStorage.getItem('speechVoice');
-    const savedRate = parseFloat(localStorage.getItem('speechRate') || '1');
-    const savedPitch = parseFloat(localStorage.getItem('speechPitch') || '1');
-    
-    const voice = savedVoice 
-      ? voices.find(v => v.name === savedVoice)
-      : voices.find(v => v.lang === 'en-US' && v.name.includes('Google')) || voices[0];
+    const savedVoice = localStorage.getItem("speechVoice");
+    const savedRate = parseFloat(localStorage.getItem("speechRate") || "1");
+    const savedPitch = parseFloat(localStorage.getItem("speechPitch") || "1");
+
+    const voice = savedVoice
+      ? voices.find((v) => v.name === savedVoice)
+      : voices.find((v) => v.lang === "en-US" && v.name.includes("Google")) ||
+        voices[0];
 
     speechRef.current = new SpeechSynthesisUtterance(text);
-    
+
     if (voice) {
       speechRef.current.voice = voice;
     }
     speechRef.current.rate = savedRate;
     speechRef.current.pitch = savedPitch;
+
+    speechRef.current.onstart = () => {
+      setIsSpeaking(true);
+      speakingStartTimeRef.current = performance.now();
+      
+      // Track speech start
+      trackEngagement("speech_started", {
+        text_length: text.length,
+        is_command: isCommand,
+        language: language,
+      });
+    };
     
-    speechRef.current.onstart = () => setIsSpeaking(true);
     speechRef.current.onend = () => {
       setIsSpeaking(false);
       
+      // Calculate speaking duration
+      if (speakingStartTimeRef.current) {
+        const speakingDuration = Math.round(performance.now() - speakingStartTimeRef.current);
+        totalSpeakingTimeRef.current += speakingDuration;
+        
+        // Track speech completion
+        trackEngagement("speech_completed", {
+          text_length: text.length,
+          speaking_duration_ms: speakingDuration,
+          total_speaking_time_ms: totalSpeakingTimeRef.current,
+          is_command: isCommand,
+          language: language,
+        });
+        
+        speakingStartTimeRef.current = null;
+      }
+
       if (isCommand) {
         if (pauseTimeoutRef.current) {
           clearTimeout(pauseTimeoutRef.current);
         }
-        
+
         pauseTimeoutRef.current = window.setTimeout(() => {
           setIsPaused(false);
           pauseTimeoutRef.current = null;
         }, 2000);
       }
     };
-    
+
     window.speechSynthesis.speak(speechRef.current);
   };
 
   const stopSpeaking = () => {
     window.speechSynthesis.cancel();
     setIsSpeaking(false);
-    
+
+    // Calculate interrupted speaking time
+    let interruptedDuration = 0;
+    if (speakingStartTimeRef.current) {
+      interruptedDuration = Math.round(performance.now() - speakingStartTimeRef.current);
+      speakingStartTimeRef.current = null;
+    }
+
+    // Track speech stopped with metrics
+    trackEngagement("speech_stopped", {
+      method: "user_action",
+      language: language,
+      interrupted_duration_ms: interruptedDuration,
+      total_speaking_time_ms: totalSpeakingTimeRef.current,
+    });
+
     if (pauseTimeoutRef.current) {
       clearTimeout(pauseTimeoutRef.current);
     }
-    
+
     setTimeout(() => {
       setIsPaused(false);
     }, 500);
@@ -236,7 +472,9 @@ function App() {
         <div className="text-center p-8">
           <h1 className="text-2xl font-bold mb-4">Browser Not Supported</h1>
           <p>Sorry, your browser doesn't support speech recognition.</p>
-          <p className="mt-2 text-gray-400">Please try using Chrome, Edge, or Safari.</p>
+          <p className="mt-2 text-gray-400">
+            Please try using Chrome, Edge, or Safari.
+          </p>
         </div>
       </div>
     );
@@ -246,9 +484,13 @@ function App() {
     return (
       <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center">
         <div className="text-center p-8">
-          <h1 className="text-2xl font-bold mb-4">Microphone Access Required</h1>
+          <h1 className="text-2xl font-bold mb-4">
+            Microphone Access Required
+          </h1>
           <p>Please allow microphone access to use voice commands.</p>
-          <p className="mt-2 text-gray-400">You can change this in your browser settings.</p>
+          <p className="mt-2 text-gray-400">
+            You can change this in your browser settings.
+          </p>
         </div>
       </div>
     );
@@ -274,14 +516,22 @@ function App() {
               <button
                 onClick={isSpeaking ? stopSpeaking : undefined}
                 className={`p-1.5 rounded-full transition-colors ${
-                  isSpeaking ? 'bg-red-500/70 hover:bg-red-600/70' : 'bg-indigo-600/70 hover:bg-indigo-700/70'
+                  isSpeaking
+                    ? "bg-red-500/70 hover:bg-red-600/70"
+                    : "bg-indigo-600/70 hover:bg-indigo-700/70"
                 }`}
               >
-                {isSpeaking ? <StopCircle className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
+                {isSpeaking ? (
+                  <StopCircle className="w-5 h-5" />
+                ) : (
+                  <Volume2 className="w-5 h-5" />
+                )}
               </button>
-              <div className={`p-1.5 rounded-full transition-colors ${
-                listening ? 'bg-green-500/70' : 'bg-indigo-600/70'
-              }`}>
+              <div
+                className={`p-1.5 rounded-full transition-colors ${
+                  listening ? "bg-green-500/70" : "bg-indigo-600/70"
+                }`}
+              >
                 <Mic className="w-5 h-5" />
               </div>
             </div>
@@ -300,7 +550,11 @@ function App() {
           />
           <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-indigo-600/90 text-white px-4 py-2 rounded-full flex items-center gap-2 shadow-lg backdrop-blur-sm text-sm">
             <Camera className="w-5 h-5" />
-            {isCapturing ? t.analyzing : isPaused ? t.listeningToCommand : t.autoAnalyzing}
+            {isCapturing
+              ? t.analyzing
+              : isPaused
+              ? t.listeningToCommand
+              : t.autoAnalyzing}
           </div>
         </div>
 
@@ -309,14 +563,32 @@ function App() {
             <Tab
               icon={<FileText className="w-4 h-4" />}
               label={t.sceneMode}
-              active={mode === 'scene'}
-              onClick={() => setMode('scene')}
+              active={mode === "scene"}
+              onClick={() => {
+                const previousMode = mode;
+                setMode("scene");
+                trackEvent("mode_switched", {
+                  from_mode: previousMode,
+                  to_mode: "scene",
+                  method: "button_click",
+                  language: language,
+                });
+              }}
             />
             <Tab
               icon={<Navigation2 className="w-4 h-4" />}
               label={t.navigationMode}
-              active={mode === 'navigation'}
-              onClick={() => setMode('navigation')}
+              active={mode === "navigation"}
+              onClick={() => {
+                const previousMode = mode;
+                setMode("navigation");
+                trackEvent("mode_switched", {
+                  from_mode: previousMode,
+                  to_mode: "navigation",
+                  method: "button_click",
+                  language: language,
+                });
+              }}
             />
           </div>
 
@@ -325,21 +597,24 @@ function App() {
               <div className="mb-3 p-2.5 bg-red-500/20 rounded-lg border border-red-500/30 flex items-start gap-2">
                 <AlertTriangle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
                 <div>
-                  <h3 className="font-semibold text-red-400 mb-1 text-sm">{t.hazardsDetected}</h3>
+                  <h3 className="font-semibold text-red-400 mb-1 text-sm">
+                    {t.hazardsDetected}
+                  </h3>
                   <ul className="list-disc list-inside space-y-0.5 text-sm">
                     {analysis.hazards.map((hazard, i) => (
-                      <li key={i} className="text-red-200">{hazard}</li>
+                      <li key={i} className="text-red-200">
+                        {hazard}
+                      </li>
                     ))}
                   </ul>
                 </div>
               </div>
             )}
-            
+
             <p className="text-white/90 leading-relaxed text-sm">
-              {mode === 'navigation' 
-                ? (analysis?.navigation || t.analyzingNavigation)
-                : (analysis?.description || t.analyzingScene)
-              }
+              {mode === "navigation"
+                ? analysis?.navigation || t.analyzingNavigation
+                : analysis?.description || t.analyzingScene}
             </p>
           </div>
         </div>

@@ -1,8 +1,93 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
-const GEMINI_API_KEY = 'YOUR API KEY HERE';
+function parseGeminiKeys(): string[] {
+  const raw =
+    (import.meta.env.VITE_GEMINI_API_KEYS as string | undefined) ??
+    (import.meta.env.VITE_GEMINI_API_KEY as string | undefined) ??
+    '';
 
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+  return raw
+    .split(/[,;\n]/g)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .filter((s) => !s.toUpperCase().includes('YOUR_') && !s.includes('YOUR '));
+}
+
+const GEMINI_API_KEYS = parseGeminiKeys();
+let geminiKeyIndex = 0;
+const geminiClients = new Map<string, GoogleGenerativeAI>();
+
+function getClientForKey(key: string): GoogleGenerativeAI {
+  const existing = geminiClients.get(key);
+  if (existing) return existing;
+  const created = new GoogleGenerativeAI(key);
+  geminiClients.set(key, created);
+  return created;
+}
+
+function getCurrentGeminiKey(): string {
+  if (GEMINI_API_KEYS.length === 0) {
+    throw new Error(
+      'Missing Gemini API key. Set VITE_GEMINI_API_KEYS (comma-separated) or VITE_GEMINI_API_KEY in a local .env file.'
+    );
+  }
+  return GEMINI_API_KEYS[geminiKeyIndex % GEMINI_API_KEYS.length]!;
+}
+
+function rotateGeminiKey() {
+  if (GEMINI_API_KEYS.length <= 1) return;
+  geminiKeyIndex = (geminiKeyIndex + 1) % GEMINI_API_KEYS.length;
+}
+
+function shouldRotateKey(error: unknown): boolean {
+  const msg =
+    typeof error === 'object' && error && 'message' in error
+      ? String((error as { message?: unknown }).message)
+      : String(error);
+  // Catch common quota / rate limit / key issues.
+  return (
+    msg.includes('429') ||
+    msg.toLowerCase().includes('resource_exhausted') ||
+    msg.toLowerCase().includes('quota') ||
+    msg.toLowerCase().includes('rate') ||
+    msg.toLowerCase().includes('limit') ||
+    msg.toLowerCase().includes('api key not valid') ||
+    msg.toLowerCase().includes('permission') ||
+    msg.toLowerCase().includes('unauth')
+  );
+}
+
+async function withGeminiKeyRotation<T>(fn: (genAI: GoogleGenerativeAI) => Promise<T>): Promise<T> {
+  let lastError: unknown;
+  const attempts = Math.max(1, GEMINI_API_KEYS.length);
+
+  for (let i = 0; i < attempts; i++) {
+    const key = getCurrentGeminiKey();
+    const client = getClientForKey(key);
+    try {
+      return await fn(client);
+    } catch (err) {
+      lastError = err;
+      if (GEMINI_API_KEYS.length > 1 && shouldRotateKey(err)) {
+        rotateGeminiKey();
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+type InlineDataPart = { inlineData: { data: string; mimeType: string } };
+type GenerateContentInput = Array<string | InlineDataPart>;
+
+async function generateContentWithRotation(input: GenerateContentInput) {
+  return withGeminiKeyRotation(async (genAI) => {
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+    return model.generateContent(input);
+  });
+}
 
 // Helper function to translate hazards to Malayalam and Hindi
 const translateHazardsToLanguage = (hazards: string[], language: string): string[] => {
@@ -51,10 +136,8 @@ export async function analyzeImage(base64Image: string, language: string = 'en')
       throw new Error('Invalid base64 image format');
     }
 
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-    
     // First, analyze for hazards in English for consistent detection
-    const hazardResult = await model.generateContent([
+    const hazardResult = await generateContentWithRotation([
       'Analyze this image for any potential hazards or dangers that a visually impaired person should be warned about. Focus on immediate threats like weapons, vehicles, obstacles, or dangerous situations. Respond with ONLY the hazards in a comma-separated list. If no hazards are found, respond with "NONE".',
       { inlineData: { data: imageData, mimeType: 'image/jpeg' } }
     ]);
@@ -71,7 +154,7 @@ export async function analyzeImage(base64Image: string, language: string = 'en')
       descriptionPrompt = `इस दृश्य का एक प्राकृतिक हिंदी भाषा में वर्णन करें (50 शब्दों से कम में)। उचित हिंदी व्याकरण और प्राकृतिक वाक्य रचना का उपयोग करें। मुख्य तत्वों और उनकी व्यवस्था का वर्णन करें। केवल देवनागरी लिपि में उत्तर दें।`;
     }
 
-    const descResult = await model.generateContent([
+    const descResult = await generateContentWithRotation([
       descriptionPrompt,
       { inlineData: { data: imageData, mimeType: 'image/jpeg' } }
     ]);
@@ -104,10 +187,8 @@ export async function analyzeForNavigation(base64Image: string, language: string
       throw new Error('Invalid base64 image format');
     }
 
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-    
     // First, analyze for hazards in English for consistent detection
-    const hazardResult = await model.generateContent([
+    const hazardResult = await generateContentWithRotation([
       'Analyze this image for any potential hazards or dangers that a visually impaired person should be warned about while navigating. Focus on immediate obstacles, steps, uneven surfaces, or moving objects. Respond with ONLY the hazards in a comma-separated list. If no hazards are found, respond with "NONE".',
       { inlineData: { data: imageData, mimeType: 'image/jpeg' } }
     ]);
@@ -124,7 +205,7 @@ export async function analyzeForNavigation(base64Image: string, language: string
       navigationPrompt = `एक दृष्टिबाधित व्यक्ति के लिए प्राकृतिक हिंदी भाषा में नेविगेशन मार्गदर्शन प्रदान करें। सुरक्षित रास्तों, बचने योग्य बाधाओं और सुझाए गए दिशाओं की जानकारी शामिल करें। 50 शब्दों से कम में और केवल देवनागरी लिपि में उत्तर दें।`;
     }
 
-    const navResult = await model.generateContent([
+    const navResult = await generateContentWithRotation([
       navigationPrompt,
       { inlineData: { data: imageData, mimeType: 'image/jpeg' } }
     ]);
