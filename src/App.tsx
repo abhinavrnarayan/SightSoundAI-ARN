@@ -56,7 +56,7 @@ function App() {
   const speakingStartTimeRef = useRef<number | null>(null);
   const lastInteractionTimeRef = useRef<number>(Date.now());
   const lastCaptureTimeRef = useRef<number>(0);
-  const CAPTURE_COOLDOWN_MS = 6000; // Minimum gap between auto-captures
+  const CAPTURE_COOLDOWN_MS = 3000; // Minimum gap between auto-captures (reduced for lower latency)
   const firstCaptureRef = useRef<boolean>(false);
   const preloadedAnalysisRef = useRef<{
     objects: string[];
@@ -64,6 +64,9 @@ function App() {
     hazards: string[];
     navigation?: string;
     mode: "scene" | "navigation";
+  } | null>(null);
+  const voiceCommandRef = useRef<{
+    onCommand: () => void;
   } | null>(null);
 
   const t = translations[language];
@@ -180,9 +183,13 @@ function App() {
           "നാവിഗേഷൻ",
           "നാവിഗേഷൻ മോഡ്",
         ],
-        callback: () => handleModeSwitch("navigation"),
+        callback: () => {
+          if (!isStarted) return;
+          voiceCommandRef.current = { onCommand: () => handleModeSwitch("navigation") };
+          speak(t.switchedToMode("navigation"), true);
+        },
         isFuzzyMatch: true,
-        fuzzyMatchingThreshold: 0.8,
+        fuzzyMatchingThreshold: 0.6,
       },
       {
         command: [
@@ -198,9 +205,13 @@ function App() {
           "ദൃശ്യ വിവരണം",
           "സീൻ മോഡ്",
         ],
-        callback: () => handleModeSwitch("scene"),
+        callback: () => {
+          if (!isStarted) return;
+          voiceCommandRef.current = { onCommand: () => handleModeSwitch("scene") };
+          speak(t.switchedToMode("scene"), true);
+        },
         isFuzzyMatch: true,
-        fuzzyMatchingThreshold: 0.8,
+        fuzzyMatchingThreshold: 0.6,
       },
       {
         command: [
@@ -217,7 +228,7 @@ function App() {
           speak(t.welcomeMessage, true);
         },
         isFuzzyMatch: true,
-        fuzzyMatchingThreshold: 0.8,
+        fuzzyMatchingThreshold: 0.6,
       },
       {
         command: [
@@ -229,10 +240,11 @@ function App() {
         ],
         callback: () => {
           setIsPaused(true);
+          window.speechSynthesis.cancel();
           speak(t.stopMessage, true);
         },
         isFuzzyMatch: true,
-        fuzzyMatchingThreshold: 0.8,
+        fuzzyMatchingThreshold: 0.6,
       },
       {
         command: [
@@ -247,7 +259,7 @@ function App() {
           speak(t.restartMessage, true);
         },
         isFuzzyMatch: true,
-        fuzzyMatchingThreshold: 0.8,
+        fuzzyMatchingThreshold: 0.6,
       },
       {
         command: [
@@ -261,6 +273,7 @@ function App() {
           "അപകട സാധ്യതകൾ",
         ],
         callback: () => {
+          if (!isStarted) return;
           if (analysis?.hazards) {
             const response =
               analysis.hazards.length > 0
@@ -287,7 +300,12 @@ function App() {
           "भाषा बदलें",
           "ഭാഷ മാറ്റുക",
         ],
-        callback: handleLanguageToggle,
+        callback: () => {
+          if (!isStarted) return;
+          handleLanguageToggle();
+        },
+        isFuzzyMatch: true,
+        fuzzyMatchingThreshold: 0.6,
       },
     ],
   });
@@ -500,8 +518,8 @@ function App() {
 
       if (timeLeft <= 0) {
         lastCaptureTimeRef.current = Date.now();
-        // When speaking, preload the next analysis so it's ready immediately after narration.
-        handleCapture(isSpeaking);
+        // Normal capture (not preloading - preloading is handled in speak onstart).
+        handleCapture(false);
         timeLeft = interval;
       } else {
         timeLeft--;
@@ -566,7 +584,13 @@ function App() {
     speechRef.current.onstart = () => {
       setIsSpeaking(true);
       speakingStartTimeRef.current = performance.now();
-      
+
+      // Start preloading the next analysis immediately when TTS starts,
+      // so it's ready by the time narration finishes (zero-latency transition).
+      if (!isPaused && webcamRef.current) {
+        handleCapture(true);
+      }
+
       // Track speech start
       trackEngagement("speech_started", {
         text_length: text.length,
@@ -629,6 +653,19 @@ function App() {
           setIsPaused(false);
           pauseTimeoutRef.current = null;
         }, 2000);
+      }
+
+      // Execute any deferred voice command that was recognized while speaking.
+      if (voiceCommandRef.current) {
+        const cmd = voiceCommandRef.current;
+        voiceCommandRef.current = null;
+        cmd.onCommand();
+      }
+
+      // Restart speech recognition after TTS finishes so voice commands keep working.
+      if (browserSupportsSpeechRecognition && isMicrophoneAvailable && !isPaused) {
+        SpeechRecognition.stopListening();
+        SpeechRecognition.startListening({ continuous: true });
       }
     };
 

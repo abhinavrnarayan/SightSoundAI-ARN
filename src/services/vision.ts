@@ -78,7 +78,6 @@ function shouldRotateKey(error: unknown): boolean {
     typeof error === 'object' && error && 'message' in error
       ? String((error as { message?: unknown }).message)
       : String(error);
-  // Catch common quota / rate limit / key issues.
   return (
     msg.includes('429') ||
     msg.toLowerCase().includes('resource_exhausted') ||
@@ -123,6 +122,90 @@ async function generateContentWithRotation(input: GenerateContentInput) {
   });
 }
 
+// Single combined prompt that returns hazards, description/navigation, and objects in one API call.
+// This cuts latency in half compared to two separate calls.
+function buildAnalysisPrompt(mode: 'scene' | 'navigation', language: string): string {
+  if (mode === 'navigation') {
+    if (language === 'ml') {
+      return `നavioigate ചെയ്യുന്ന ദൃശ്യവിശകലനം നടത്തുക. നിഗംനിത്മാര-ൽ puestos:
+HAZARDS: അപകടങ്ങളുടെкомма-vigraṇicka പട്ടിക, അല്ലെങ്കിൽ "NONE".
+NAVIGATION: സുരക്ഷित പാത, ഒഴിവാക്കേണ്ട തടസ്സങ്ങൾ, ദിശ (50 വാക്കിൽ താഴെ), മലയാളത്തിൽ മാത്രം.
+ഉത്തരം ഇங்க്‌ലീഷ്‌ Männern respuesta നൽകേണ്ടതില്ല.`
+    }
+    if (language === 'hi') {
+      return `नेविगेशन विश्लेषण करें:
+HAZARDS: खतरों की कॉमा-सेपरेटेड सूची, या "NONE".
+NAVIGATION: सुरक्षित रास्ता, बचने योग्य बाधाएं, सुझाई गई दिशा (50 शब्दों से कम), हिंदी में केवल देवनागरी लिपि में.
+उत्तर केवल हिंदी में दें।`
+    }
+    return `Analyze this scene for navigation guidance for a visually impaired person.
+HAZARDS: comma-separated list of immediate hazards (steps, uneven surfaces, obstacles, vehicles, moving objects), or "NONE" if none.
+NAVIGATION: clear, concise navigation guidance - safe path, obstacles to avoid, suggested direction (under 50 words).
+Respond in English only. Format exactly as shown above.`;
+  }
+
+  // Scene mode
+  if (language === 'ml') {
+    return `ദൃശ്യവിശകലനം നടത്തുക:
+HAZARDS: അപകടങ്ങൾ, അല്ലെങ്കിൽ "NONE".
+DESCRIPTION: ദൃശ്യത്തിന്റെ ഒരു വാചകം വിവരണം (50 വാക്കിൽ താഴെ), മലയാളത്തിൽ മാത്രം.
+OBJECTS: അവിടെ കാണുന്ന വസ്തുക്കൾ (ഇംഗ്ലീഷിൽ).
+ഉത്തരം മലയാളത്തിൽ മാത്രം നൽകുക.`
+  }
+  if (language === 'hi') {
+    return `दृश्य विश्लेषण करें:
+HAZARDS: खतरे, या "NONE".
+DESCRIPTION: दृश्य का एक वाक्य विवरण (50 शब्दों से कम), केवल देवनागरी लिपि में हिंदी में.
+OBJECTS: दिखने वाली वस्तुएं (अंग्रेजी में).
+उत्तर केवल हिंदी में दें।`
+  }
+  return `Analyze this scene for a visually impaired person.
+HAZARDS: comma-separated list of immediate hazards, or "NONE" if none.
+DESCRIPTION: one clear sentence describing the scene (under 50 words).
+OBJECTS: comma-separated list of objects visible in English.
+Respond in English only. Format exactly as shown above.`;
+}
+
+function parseAnalysisResponse(text: string, mode: 'scene' | 'navigation', language: string) {
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  let hazards = '';
+  let description = '';
+  let objects = '';
+  let navigation = '';
+
+  for (const line of lines) {
+    const upper = line.toUpperCase();
+    if (upper.startsWith('HAZARDS:')) {
+      hazards = line.slice('HAZARDS:'.length).trim();
+    } else if (upper.startsWith('DESCRIPTION:')) {
+      description = line.slice('DESCRIPTION:'.length).trim();
+    } else if (upper.startsWith('OBJECTS:')) {
+      objects = line.slice('OBJECTS:'.length).trim();
+    } else if (upper.startsWith('NAVIGATION:')) {
+      navigation = line.slice('NAVIGATION:'.length).trim();
+    }
+  }
+
+  const hazardList =
+    hazards === 'NONE' || !hazards
+      ? []
+      : hazards.split(',').map((h) => h.trim()).filter(Boolean);
+
+  const objectList = objects
+    ? objects.split(',').map((o) => o.trim()).filter(Boolean)
+    : [];
+
+  return {
+    hazards:
+      language === 'en'
+        ? hazardList
+        : translateHazardsToLanguage(hazardList, language),
+    description,
+    objects: objectList,
+    navigation,
+  };
+}
+
 // Helper function to translate hazards to Malayalam and Hindi
 const translateHazardsToLanguage = (hazards: string[], language: string): string[] => {
   const hazardTranslations: { [key: string]: { ml: string; hi: string } } = {
@@ -155,7 +238,7 @@ const translateHazardsToLanguage = (hazards: string[], language: string): string
         return translations[language as 'ml' | 'hi'] || hazard;
       }
     }
-    return hazard; // Return original if no translation found
+    return hazard;
   });
 };
 
@@ -174,39 +257,17 @@ export async function analyzeImage(base64Image: string, language: string = 'en')
     const compressed = await compressImage(`data:image/jpeg;base64,${imageData}`);
     const compressedData = compressed.split(',')[1] || imageData;
 
-    // First, analyze for hazards in English for consistent detection
-    const hazardResult = await generateContentWithRotation([
-      'Analyze this image for any potential hazards or dangers that a visually impaired person should be warned about. Focus on immediate threats like weapons, vehicles, obstacles, or dangerous situations. Respond with ONLY the hazards in a comma-separated list. If no hazards are found, respond with "NONE".',
+    // Single API call returns hazards, description, and objects together
+    const result = await generateContentWithRotation([
+      buildAnalysisPrompt('scene', language),
       { inlineData: { data: compressedData, mimeType: 'image/jpeg' } }
     ]);
-    
-    const hazardText = hazardResult.response.text();
-    const hazards = hazardText === 'NONE' ? [] : hazardText.split(',').map(h => h.trim());
 
-    // Get scene description with specific language instructions
-    let descriptionPrompt = 'Describe this scene in a single, clear sentence (50 words or less). Focus on the main elements and their arrangement.';
-    
-    if (language === 'ml') {
-      descriptionPrompt = `Provide a natural Malayalam language description of this scene in a single sentence (50 words or less). Use proper Malayalam grammar and natural phrasing. Focus on describing the main elements and their arrangement in a way that sounds natural to Malayalam speakers. Respond ONLY in Malayalam script.`;
-    } else if (language === 'hi') {
-      descriptionPrompt = `इस दृश्य का एक प्राकृतिक हिंदी भाषा में वर्णन करें (50 शब्दों से कम में)। उचित हिंदी व्याकरण और प्राकृतिक वाक्य रचना का उपयोग करें। मुख्य तत्वों और उनकी व्यवस्था का वर्णन करें। केवल देवनागरी लिपि में उत्तर दें।`;
-    }
-
-    const descResult = await generateContentWithRotation([
-      descriptionPrompt,
-      { inlineData: { data: compressedData, mimeType: 'image/jpeg' } }
-    ]);
-    const description = descResult.response.text().split(/[.!?]/, 1)[0].trim();
-
-    // Extract objects from the description (keep in English for consistency)
-    const commonObjects = ['person', 'chair', 'table', 'computer', 'phone', 'book', 'window', 'door', 'wall', 'desk', 'lamp', 'screen', 'monitor', 'keyboard', 'mouse', 'headphone', 'camera', 'wire', 'cable', 'jacket', 'shirt', 'pants', 'shoes'];
-    const objectMatches = description.toLowerCase().match(new RegExp(`\\b(${commonObjects.join('|')})\\b`, 'g')) || [];
-    const objects = [...new Set(objectMatches)];
-
+    const parsed = parseAnalysisResponse(result.response.text(), 'scene', language);
     return {
-      objects,
-      description,
-      hazards: language === 'en' ? hazards : translateHazardsToLanguage(hazards, language)
+      objects: parsed.objects,
+      description: parsed.description,
+      hazards: parsed.hazards,
     };
   } catch (error) {
     console.error('Error analyzing image:', error);
@@ -229,33 +290,16 @@ export async function analyzeForNavigation(base64Image: string, language: string
     const compressed = await compressImage(`data:image/jpeg;base64,${imageData}`);
     const compressedData = compressed.split(',')[1] || imageData;
 
-    // First, analyze for hazards in English for consistent detection
-    const hazardResult = await generateContentWithRotation([
-      'Analyze this image for any potential hazards or dangers that a visually impaired person should be warned about while navigating. Focus on immediate obstacles, steps, uneven surfaces, or moving objects. Respond with ONLY the hazards in a comma-separated list. If no hazards are found, respond with "NONE".',
+    // Single API call returns hazards and navigation together
+    const result = await generateContentWithRotation([
+      buildAnalysisPrompt('navigation', language),
       { inlineData: { data: compressedData, mimeType: 'image/jpeg' } }
     ]);
-    
-    const hazardText = hazardResult.response.text();
-    const hazards = hazardText === 'NONE' ? [] : hazardText.split(',').map(h => h.trim());
 
-    // Get navigation guidance with specific language instructions
-    let navigationPrompt = 'Analyze this scene and provide clear, concise navigation guidance for a visually impaired person. Include information about safe paths, obstacles to avoid, and suggested directions. Keep it under 50 words and focus on immediate, actionable guidance.';
-    
-    if (language === 'ml') {
-      navigationPrompt = `Provide natural Malayalam language navigation guidance for a visually impaired person. Include information about safe paths, obstacles to avoid, and suggested directions. Use proper Malayalam grammar and natural phrasing. Keep it under 50 words and respond ONLY in Malayalam script.`;
-    } else if (language === 'hi') {
-      navigationPrompt = `एक दृष्टिबाधित व्यक्ति के लिए प्राकृतिक हिंदी भाषा में नेविगेशन मार्गदर्शन प्रदान करें। सुरक्षित रास्तों, बचने योग्य बाधाओं और सुझाए गए दिशाओं की जानकारी शामिल करें। 50 शब्दों से कम में और केवल देवनागरी लिपि में उत्तर दें।`;
-    }
-
-    const navResult = await generateContentWithRotation([
-      navigationPrompt,
-      { inlineData: { data: compressedData, mimeType: 'image/jpeg' } }
-    ]);
-    const navigation = navResult.response.text().split(/[.!?]/, 1)[0].trim();
-
+    const parsed = parseAnalysisResponse(result.response.text(), 'navigation', language);
     return {
-      navigation,
-      hazards: language === 'en' ? hazards : translateHazardsToLanguage(hazards, language)
+      navigation: parsed.navigation,
+      hazards: parsed.hazards,
     };
   } catch (error) {
     console.error('Error analyzing image for navigation:', error);
