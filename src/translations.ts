@@ -15,7 +15,10 @@ export const translations = {
     analyzingNavigation: 'Analyzing navigation...',
     errorAnalyzing: "I'm having trouble analyzing the image. Please try again.",
     voiceSettingsUpdated: 'Voice settings updated',
-    testMessage: 'This is a test message with the current voice settings'
+    testMessage: 'This is a test message with the current voice settings',
+    welcomeMessage: 'Welcome to SightSound AI. I am your assistant for the visually impaired. Tap Start or say Start to begin describing the world around you.',
+    stopMessage: 'Stopped. I will not analyze until you say Start or Restart.',
+    restartMessage: 'Resumed. I will start describing the scene again.',
   },
   ml: {
     switchedToMode: (mode: string) => `${mode === 'scene' ? 'ദൃശ്യ വിവരണം' : 'നാവിഗേഷൻ'} മോഡിലേക്ക് മാറി`,
@@ -31,7 +34,10 @@ export const translations = {
     analyzingNavigation: 'നാവിഗേഷൻ വിശകലനം ചെയ്യുന്നു...',
     errorAnalyzing: 'ചിത്രം വിശകലനം ചെയ്യുന്നതിൽ പ്രശ്നമുണ്ട്. ദയവായി വീണ്ടും ശ്രമിക്കുക.',
     voiceSettingsUpdated: 'വോയ്‌സ് ക്രമീകരണങ്ങൾ അപ്‌ഡേറ്റ് ചെയ്‌തു',
-    testMessage: 'ഇത് നിലവിലെ വോയ്‌സ് ക്രമീകരണങ്ങളുള്ള ഒരു പരീക്ഷണ സന്ദേശമാണ്'
+    testMessage: 'ഇത് നിലവിലെ വോയ്‌സ് ക്രമീകരണങ്ങളുള്ള ഒരു പരീക്ഷണ സന്ദേശമാണ്',
+    welcomeMessage: 'സൈറ്റ്‌സൗണ്ട് എ ഐ. ദൃശ്യവൈകല്യമുള്ളവർക്കുള്ള നിങ്ങളുടെ സഹായി ഞാനാണ്. ആരംഭിക്കാൻ Start അമർത്തുക.',
+    stopMessage: 'നിർത്തി. Start അല്ലെങ്കിൽ Restart പറഞ്ഞ് വരെ വിശകലനം നിർത്തുന്നു.',
+    restartMessage: 'പുനരാരംഭിച്ചു. വീണ്ടും വിശകലനം തുടങ്ങുന്നു.',
   },
   hi: {
     switchedToMode: (mode: string) => `${mode === 'scene' ? 'दृश्य विवरण' : 'नेविगेशन'} मोड में बदल गया`,
@@ -47,6 +53,9 @@ export const translations = {
     analyzingNavigation: 'नेविगेशन का विश्लेषण कर रहा है...',
     errorAnalyzing: 'छवि का विश्लेषण करने में समस्या है। कृपया पुनः प्रयास करें।',
     voiceSettingsUpdated: 'वॉइस सेटिंग्स अपडेट की गईं',
-    testMessage: 'यह वर्तमान वॉइस सेटिंग्स के साथ एक परीक्षण संदेश है'
+    testMessage: 'यह वर्तमान वॉइस सेटिंग्स के साथ एक परीक्षण संदेश है',
+    welcomeMessage: 'साइटसाउंड एआई में आपका स्वागत है। मैं दृष्टिबाधित व्यक्तियों के लिए आपका सहायक हूँ। शुरू करने के लिए Start बटन दबाएँ या Start कहें।',
+    stopMessage: 'रोक दिया गया। आप Start या Restart कहने तक मैं विश्लेषण नहीं करूंगा।',
+    restartMessage: 'पुनः आरंभ किया गया। मैं फिर से दृश्य का वर्णन शुरू करूंगा।',
   }
 } as const;

@@ -36,6 +36,7 @@ import { translations, Language } from "./translations";
 
 function App() {
   const [isCapturing, setIsCapturing] = useState(false);
+  const [isStarted, setIsStarted] = useState(false);
   const [analysis, setAnalysis] = useState<{
     objects: string[];
     description: string;
@@ -57,6 +58,13 @@ function App() {
   const lastCaptureTimeRef = useRef<number>(0);
   const CAPTURE_COOLDOWN_MS = 6000; // Minimum gap between auto-captures
   const firstCaptureRef = useRef<boolean>(false);
+  const preloadedAnalysisRef = useRef<{
+    objects: string[];
+    description: string;
+    hazards: string[];
+    navigation?: string;
+    mode: "scene" | "navigation";
+  } | null>(null);
 
   const t = translations[language];
 
@@ -196,6 +204,53 @@ function App() {
       },
       {
         command: [
+          "start",
+          "begin",
+          "start app",
+          "开始",
+          "शुरू करें",
+          "തുടங்கുക",
+        ],
+        callback: () => {
+          setIsStarted(true);
+          setIsPaused(false);
+          speak(t.welcomeMessage, true);
+        },
+        isFuzzyMatch: true,
+        fuzzyMatchingThreshold: 0.8,
+      },
+      {
+        command: [
+          "stop",
+          "pause",
+          "stop app",
+          "रोकें",
+          "നിർത്തുക",
+        ],
+        callback: () => {
+          setIsPaused(true);
+          speak(t.stopMessage, true);
+        },
+        isFuzzyMatch: true,
+        fuzzyMatchingThreshold: 0.8,
+      },
+      {
+        command: [
+          "restart",
+          "resume",
+          "continue",
+          "पुनः शुरू करें",
+          "മulai ചെയ്യുക",
+        ],
+        callback: () => {
+          setIsPaused(false);
+          speak(t.restartMessage, true);
+        },
+        isFuzzyMatch: true,
+        fuzzyMatchingThreshold: 0.8,
+      },
+      {
+        command: [
           "hazards",
           "dangers",
           "what are the hazards",
@@ -244,8 +299,60 @@ function App() {
     aspectRatio: { ideal: window.innerWidth / window.innerHeight },
   };
 
-  const handleCapture = useCallback(async () => {
-    if (!webcamRef.current || isPaused || isSpeaking) return;
+  // Build conversational, assistant-like speech for blind users - scene mode
+  function buildSceneSpeech(result: {
+    objects: string[];
+    description: string;
+    hazards: string[];
+  }): string {
+    const parts: string[] = [];
+
+    // Start with a natural description of what's in front
+    if (result.description) {
+      parts.push(result.description);
+    }
+
+    // Mention key objects naturally
+    if (result.objects && result.objects.length > 0) {
+      const objectList = result.objects.slice(0, 5).join(', ');
+      parts.push(`I can see ${objectList} nearby.`);
+    }
+
+    // Hazards come first if any - critical for safety
+    if (result.hazards && result.hazards.length > 0) {
+      const hazardList = result.hazards.join(', ');
+      parts.push(`⚠️ Be careful. I detected hazards: ${hazardList}.`);
+    } else {
+      parts.push('No immediate hazards detected.');
+    }
+
+    return parts.join(' ');
+  }
+
+  // Build conversational, assistant-like speech for blind users - navigation mode
+  function buildNavigationSpeech(result: {
+    hazards: string[];
+    navigation?: string;
+  }): string {
+    const parts: string[] = [];
+
+    // Navigation guidance first - most important for blind users walking around
+    if (result.navigation) {
+      parts.push(result.navigation);
+    }
+
+    // Hazards - critical safety info
+    if (result.hazards && result.hazards.length > 0) {
+      const hazardList = result.hazards.join(', ');
+      parts.push(`⚠️ Watch out. Hazards ahead: ${hazardList}.`);
+    } else {
+      parts.push('The path ahead looks clear.');
+    }
+
+    return parts.join(' ');
+  }
+
+  const handleCapture = useCallback(async (shouldPreload = false) => {    if (!webcamRef.current || isPaused) return;
 
     setIsCapturing(true);
     const analysisStartTime = performance.now();
@@ -271,13 +378,13 @@ function App() {
       if (mode === "navigation") {
         const result = await analyzeForNavigation(imageSrc, language);
         const analysisDuration = Math.round(performance.now() - analysisStartTime);
-        
-        setAnalysis((prev) => ({
-          objects: prev?.objects || [],
-          description: prev?.description || "",
+        const analysisResult = {
+          objects: [],
+          description: result.navigation || "",
           hazards: result.hazards,
           navigation: result.navigation,
-        }));
+          mode: "navigation" as const,
+        };
 
         // Track navigation analysis with performance metrics
         trackEvent("image_analyzed", {
@@ -294,19 +401,31 @@ function App() {
         // Track performance
         trackPerformance("navigation_analysis", analysisDuration);
 
-        if (!isPaused && !isSpeaking) {
-          speak(
-            result.hazards.length > 0
-              ? `${t.detectedHazards(result.hazards)}. ${result.navigation}`
-              : result.navigation,
-            false
-          );
+        if (shouldPreload || isSpeaking) {
+          // Preload while narrating - store for next turn
+          preloadedAnalysisRef.current = analysisResult;
+        } else {
+          setAnalysis({
+            objects: [],
+            description: result.navigation || "",
+            hazards: result.hazards,
+            navigation: result.navigation,
+          });
+
+          if (!isPaused && !isSpeaking) {
+            speak(buildNavigationSpeech(result), false);
+          }
         }
       } else {
         const result = await analyzeImage(imageSrc, language);
         const analysisDuration = Math.round(performance.now() - analysisStartTime);
-        
-        setAnalysis(result);
+        const analysisResult = {
+          objects: result.objects,
+          description: result.description,
+          hazards: result.hazards,
+          navigation: undefined,
+          mode: "scene" as const,
+        };
 
         // Track scene analysis with performance metrics
         trackEvent("image_analyzed", {
@@ -324,13 +443,15 @@ function App() {
         // Track performance
         trackPerformance("scene_analysis", analysisDuration);
 
-        if (!isPaused && !isSpeaking) {
-          speak(
-            result.hazards.length > 0
-              ? `${t.detectedHazards(result.hazards)}. ${result.description}`
-              : result.description,
-            false
-          );
+        if (shouldPreload || isSpeaking) {
+          // Preload while narrating - store for next turn
+          preloadedAnalysisRef.current = analysisResult;
+        } else {
+          setAnalysis(result);
+
+          if (!isPaused && !isSpeaking) {
+            speak(buildSceneSpeech(result), false);
+          }
         }
       }
     } catch (error) {
@@ -368,7 +489,7 @@ function App() {
         timeLeft = interval;
         return;
       }
-      if (isPaused || isSpeaking || isCapturing) {
+      if (isPaused || isCapturing) {
         timeLeft = interval;
         return;
       }
@@ -379,7 +500,8 @@ function App() {
 
       if (timeLeft <= 0) {
         lastCaptureTimeRef.current = Date.now();
-        handleCapture();
+        // When speaking, preload the next analysis so it's ready immediately after narration.
+        handleCapture(isSpeaking);
         timeLeft = interval;
       } else {
         timeLeft--;
@@ -473,6 +595,31 @@ function App() {
         speakingStartTimeRef.current = null;
       }
 
+      // If we preloaded the next analysis while speaking, use it now for zero-latency transition.
+      if (!isCommand && preloadedAnalysisRef.current && !isPaused) {
+        const preloaded = preloadedAnalysisRef.current;
+        preloadedAnalysisRef.current = null;
+
+        if (preloaded.mode === "navigation") {
+          setAnalysis({
+            objects: [],
+            description: preloaded.description,
+            hazards: preloaded.hazards,
+            navigation: preloaded.navigation,
+          });
+          speak(buildNavigationSpeech(preloaded), false);
+        } else {
+          setAnalysis({
+            objects: preloaded.objects,
+            description: preloaded.description,
+            hazards: preloaded.hazards,
+            navigation: undefined,
+          });
+          speak(buildSceneSpeech(preloaded), false);
+        }
+        return;
+      }
+
       if (isCommand) {
         if (pauseTimeoutRef.current) {
           clearTimeout(pauseTimeoutRef.current);
@@ -540,6 +687,33 @@ function App() {
           <p>Please allow microphone access to use voice commands.</p>
           <p className="mt-2 text-gray-400">
             You can change this in your browser settings.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // Welcome screen - user must start before the app begins analyzing
+  if (!isStarted) {
+    return (
+      <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center justify-center p-8">
+        <div className="text-center max-w-md">
+          <Eye className="w-16 h-16 text-indigo-400 mb-6" />
+          <h1 className="text-3xl font-bold mb-4">Welcome to SightSound AI</h1>
+          <p className="text-lg text-gray-300 mb-8">
+            {t.welcomeMessage}
+          </p>
+          <button
+            onClick={() => {
+              setIsStarted(true);
+              speak(t.welcomeMessage, true);
+            }}
+            className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-4 px-8 rounded-full text-lg font-semibold transition-colors"
+          >
+            Start SightSound AI
+          </button>
+          <p className="mt-6 text-sm text-gray-400">
+            Or say "Start" to begin
           </p>
         </div>
       </div>
