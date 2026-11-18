@@ -68,6 +68,7 @@ function App() {
   const voiceCommandRef = useRef<{
     onCommand: () => void;
   } | null>(null);
+  const welcomeSpokenRef = useRef<boolean>(false);
 
   const t = translations[language];
 
@@ -548,15 +549,23 @@ function App() {
     };
   }, []);
 
+  // Auto-speak welcome message on welcome screen so blind users know what to do.
   useEffect(() => {
-    if (browserSupportsSpeechRecognition && isMicrophoneAvailable) {
+    if (!isStarted && !welcomeSpokenRef.current) {
+      welcomeSpokenRef.current = true;
+      speak(t.welcomeMessage, true);
+    }
+  }, [isStarted, t.welcomeMessage]);
+
+  useEffect(() => {
+    if (browserSupportsSpeechRecognition) {
       SpeechRecognition.startListening({ continuous: true });
     }
 
     return () => {
       SpeechRecognition.stopListening();
     };
-  }, [browserSupportsSpeechRecognition, isMicrophoneAvailable]);
+  }, [browserSupportsSpeechRecognition]);
 
   const speak = (text: string, isCommand: boolean) => {
     if (speechRef.current) {
@@ -660,12 +669,6 @@ function App() {
         const cmd = voiceCommandRef.current;
         voiceCommandRef.current = null;
         cmd.onCommand();
-      }
-
-      // Restart speech recognition after TTS finishes so voice commands keep working.
-      if (browserSupportsSpeechRecognition && isMicrophoneAvailable && !isPaused) {
-        SpeechRecognition.stopListening();
-        SpeechRecognition.startListening({ continuous: true });
       }
     };
 
