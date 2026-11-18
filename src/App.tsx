@@ -40,6 +40,8 @@ function App() {
   const totalSpeakingTimeRef = useRef<number>(0);
   const speakingStartTimeRef = useRef<number | null>(null);
   const lastInteractionTimeRef = useRef<number>(Date.now());
+  const lastCaptureTimeRef = useRef<number>(0);
+  const CAPTURE_COOLDOWN_MS = 6000; // Minimum gap between auto-captures
 
   const t = translations[language];
 
@@ -335,12 +337,22 @@ function App() {
     let timeLeft = interval;
 
     analysisIntervalRef.current = window.setInterval(() => {
-      if (isPaused || isSpeaking) {
+      // Pause auto-capture when the tab is hidden (user switched away / minimized).
+      if (document.visibilityState === 'hidden') {
         timeLeft = interval;
+        return;
+      }
+      if (isPaused || isSpeaking || isCapturing) {
+        timeLeft = interval;
+        return;
+      }
+      // Enforce a minimum cooldown between captures to avoid hammering the API.
+      if (Date.now() - lastCaptureTimeRef.current < CAPTURE_COOLDOWN_MS) {
         return;
       }
 
       if (timeLeft <= 0) {
+        lastCaptureTimeRef.current = Date.now();
         handleCapture();
         timeLeft = interval;
       } else {
@@ -356,7 +368,7 @@ function App() {
         clearTimeout(pauseTimeoutRef.current);
       }
     };
-  }, [handleCapture, isPaused, isSpeaking]);
+  }, [handleCapture, isPaused, isSpeaking, isCapturing]);
 
   useEffect(() => {
     if (browserSupportsSpeechRecognition && isMicrophoneAvailable) {

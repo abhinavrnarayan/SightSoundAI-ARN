@@ -1,5 +1,37 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
+// Downscale webcam screenshots before sending to Gemini.
+// Smaller payload = faster upload, fewer tokens, quicker responses.
+async function compressImage(
+  dataUrl: string,
+  maxDimension = 512,
+  quality = 0.7
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      let { width, height } = img;
+      if (width > maxDimension || height > maxDimension) {
+        const scale = maxDimension / Math.max(width, height);
+        width = Math.round(width * scale);
+        height = Math.round(height * scale);
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        resolve(dataUrl);
+        return;
+      }
+      ctx.drawImage(img, 0, 0, width, height);
+      resolve(canvas.toDataURL('image/jpeg', quality));
+    };
+    img.onerror = () => reject(new Error('Image compression failed'));
+    img.src = dataUrl;
+  });
+}
+
 function parseGeminiKeys(): string[] {
   const raw =
     (import.meta.env.VITE_GEMINI_API_KEYS as string | undefined) ??
@@ -136,10 +168,14 @@ export async function analyzeImage(base64Image: string, language: string = 'en')
       throw new Error('Invalid base64 image format');
     }
 
+    // Compress before sending to reduce payload size and analysis time.
+    const compressed = await compressImage(`data:image/jpeg;base64,${imageData}`);
+    const compressedData = compressed.split(',')[1] || imageData;
+
     // First, analyze for hazards in English for consistent detection
     const hazardResult = await generateContentWithRotation([
       'Analyze this image for any potential hazards or dangers that a visually impaired person should be warned about. Focus on immediate threats like weapons, vehicles, obstacles, or dangerous situations. Respond with ONLY the hazards in a comma-separated list. If no hazards are found, respond with "NONE".',
-      { inlineData: { data: imageData, mimeType: 'image/jpeg' } }
+      { inlineData: { data: compressedData, mimeType: 'image/jpeg' } }
     ]);
     
     const hazardText = hazardResult.response.text();
@@ -187,10 +223,14 @@ export async function analyzeForNavigation(base64Image: string, language: string
       throw new Error('Invalid base64 image format');
     }
 
+    // Compress before sending to reduce payload size and analysis time.
+    const compressed = await compressImage(`data:image/jpeg;base64,${imageData}`);
+    const compressedData = compressed.split(',')[1] || imageData;
+
     // First, analyze for hazards in English for consistent detection
     const hazardResult = await generateContentWithRotation([
       'Analyze this image for any potential hazards or dangers that a visually impaired person should be warned about while navigating. Focus on immediate obstacles, steps, uneven surfaces, or moving objects. Respond with ONLY the hazards in a comma-separated list. If no hazards are found, respond with "NONE".',
-      { inlineData: { data: imageData, mimeType: 'image/jpeg' } }
+      { inlineData: { data: compressedData, mimeType: 'image/jpeg' } }
     ]);
     
     const hazardText = hazardResult.response.text();
