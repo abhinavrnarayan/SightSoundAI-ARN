@@ -884,6 +884,21 @@ function App() {
         </div>
 
         <VoiceSettings onVoiceSettingsChange={(text) => speak(text, false)} />
+
+        <footer className="mt-4 p-3 border-t border-white/10 bg-black/20">
+          <div className="flex items-center justify-center gap-2 text-xs text-gray-400">
+            <span>View on GitHub</span>
+            <a
+              href="https://github.com/abhinavrnarayan/SightSoundAI-ARN"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-indigo-400 hover:text-indigo-300 underline hover:no-underline transition-colors"
+            >
+              abhinavrnarayan/SightSoundAI-ARN
+              <span className="sr-only">(opens in new tab)</span>
+            </a>
+          </div>
+        </footer>
       </main>
     </div>
   );
