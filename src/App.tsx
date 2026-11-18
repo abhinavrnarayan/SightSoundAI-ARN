@@ -1,6 +1,20 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import Webcam from "react-webcam";
-import { trackEvent, updateUserProperties, trackEngagement, trackPerformance, trackError, getSessionInfo } from "./firebase";
+import {
+  trackEvent,
+  updateUserProperties,
+  trackEngagement,
+  trackPerformance,
+  trackError,
+  getSessionInfo,
+  trackVoiceCommand,
+  trackSettingsChanged,
+  trackMicrophonePermission,
+  trackSpeechSupport,
+  trackCameraError,
+  trackKeyRotation,
+  trackTabVisibility,
+} from "./firebase";
 import {
   Camera,
   Volume2,
@@ -99,6 +113,10 @@ function App() {
       session_id: sessionInfo.sessionId,
       device_id: sessionInfo.deviceId,
     });
+
+    // Track speech recognition and microphone support
+    trackSpeechSupport(browserSupportsSpeechRecognition, isMicrophoneAvailable);
+    trackMicrophonePermission(isMicrophoneAvailable);
 
     // Track periodic engagement (every 30 seconds)
     const engagementInterval = setInterval(() => {
@@ -378,6 +396,18 @@ function App() {
     };
   }, [handleCapture, isPaused, isSpeaking, isCapturing]);
 
+  // Track tab visibility changes (user switches away / back)
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      trackTabVisibility(document.visibilityState === 'visible');
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
+
   useEffect(() => {
     if (browserSupportsSpeechRecognition && isMicrophoneAvailable) {
       SpeechRecognition.startListening({ continuous: true });
@@ -567,6 +597,9 @@ function App() {
             screenshotFormat="image/jpeg"
             videoConstraints={videoConstraints}
             className="w-full h-full object-cover"
+            onUserMediaError={(error) => {
+              trackCameraError(error?.name || 'Unknown camera error');
+            }}
           />
           <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-indigo-600/90 text-white px-4 py-2 rounded-full flex items-center gap-2 shadow-lg backdrop-blur-sm text-sm">
             <Camera className="w-5 h-5" />

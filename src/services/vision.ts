@@ -1,4 +1,5 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { trackKeyRotation } from '../firebase';
 
 // Downscale webcam screenshots before sending to Gemini.
 // Smaller payload = faster upload, fewer tokens, quicker responses.
@@ -69,6 +70,7 @@ function getCurrentGeminiKey(): string {
 function rotateGeminiKey() {
   if (GEMINI_API_KEYS.length <= 1) return;
   geminiKeyIndex = (geminiKeyIndex + 1) % GEMINI_API_KEYS.length;
+  trackKeyRotation('quota_or_rate_limit');
 }
 
 function shouldRotateKey(error: unknown): boolean {

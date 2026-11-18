@@ -318,6 +318,71 @@ export async function trackEngagement(action: string, details?: AnalyticsEventPa
   });
 }
 
+// Track voice commands from the user
+export async function trackVoiceCommand(
+  command: string,
+  language: string,
+  success: boolean,
+  details?: AnalyticsEventParams
+): Promise<void> {
+  await trackEvent('voice_command', {
+    command,
+    language,
+    success: success ? 1 : 0,
+    ...details,
+  });
+}
+
+// Track voice settings changes (rate, pitch, voice selection)
+export async function trackSettingsChanged(
+  setting: string,
+  value: unknown
+): Promise<void> {
+  await trackEvent('settings_changed', {
+    setting,
+    value: String(value),
+  });
+}
+
+// Track microphone permission status
+export async function trackMicrophonePermission(granted: boolean): Promise<void> {
+  await trackEvent('microphone_permission', {
+    granted: granted ? 1 : 0,
+  });
+}
+
+// Track speech recognition support status
+export async function trackSpeechSupport(
+  supported: boolean,
+  available: boolean
+): Promise<void> {
+  await trackEvent('speech_support', {
+    supported: supported ? 1 : 0,
+    microphone_available: available ? 1 : 0,
+  });
+}
+
+// Track camera/webcam errors
+export async function trackCameraError(error: string): Promise<void> {
+  await trackEvent('camera_error', {
+    error_message: error,
+  });
+}
+
+// Track Gemini API key rotation (quota/rate limit)
+export async function trackKeyRotation(reason: string): Promise<void> {
+  await trackEvent('key_rotation', {
+    reason,
+  });
+}
+
+// Track tab visibility changes (user switched away / back)
+export async function trackTabVisibility(visible: boolean): Promise<void> {
+  await trackEvent('tab_visibility', {
+    visible: visible ? 1 : 0,
+  });
+}
+
 // Track performance metrics
 export async function trackPerformance(metricName: string, value: number, unit: string = 'ms'): Promise<void> {
   await trackEvent('performance_metric', {

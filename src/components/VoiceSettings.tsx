@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { ChevronDown, ChevronUp, Volume2 } from 'lucide-react';
 import { translations, Language } from '../translations';
+import { trackSettingsChanged } from '../firebase';
 
 interface VoiceSettingsProps {
   onVoiceSettingsChange: (text: string) => void;
@@ -76,6 +77,11 @@ export function VoiceSettings({ onVoiceSettingsChange }: VoiceSettingsProps) {
       localStorage.setItem('speechRate', rate.toString());
       localStorage.setItem('speechPitch', pitch.toString());
       localStorage.setItem('speechVoice', selectedVoice);
+
+      // Track voice settings changes
+      trackSettingsChanged('speech_rate', rate);
+      trackSettingsChanged('speech_pitch', pitch);
+      trackSettingsChanged('speech_voice', selectedVoice);
 
       if (window.speechSynthesis.speaking) {
         window.speechSynthesis.cancel();
