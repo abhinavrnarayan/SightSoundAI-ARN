@@ -1,5 +1,3 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
-
 // Downscale webcam screenshots before sending to Gemini.
 // Smaller payload = faster upload, fewer tokens, quicker responses.
 async function compressImage(
@@ -32,93 +30,40 @@ async function compressImage(
   });
 }
 
-function parseGeminiKeys(): string[] {
-  const raw =
-    (import.meta.env.VITE_GEMINI_API_KEYS as string | undefined) ??
-    (import.meta.env.VITE_GEMINI_API_KEY as string | undefined) ??
-    '';
-
-  return raw
-    .split(/[,;\n]/g)
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .filter((s) => !s.toUpperCase().includes('YOUR_') && !s.includes('YOUR '));
-}
-
-const GEMINI_API_KEYS = parseGeminiKeys();
-let geminiKeyIndex = 0;
-const geminiClients = new Map<string, GoogleGenerativeAI>();
-
-function getClientForKey(key: string): GoogleGenerativeAI {
-  const existing = geminiClients.get(key);
-  if (existing) return existing;
-  const created = new GoogleGenerativeAI(key);
-  geminiClients.set(key, created);
-  return created;
-}
-
-function getCurrentGeminiKey(): string {
-  if (GEMINI_API_KEYS.length === 0) {
-    throw new Error(
-      'Missing Gemini API key. Set VITE_GEMINI_API_KEYS (comma-separated) or VITE_GEMINI_API_KEY in a local .env file.'
-    );
-  }
-  return GEMINI_API_KEYS[geminiKeyIndex % GEMINI_API_KEYS.length]!;
-}
-
-function rotateGeminiKey() {
-  if (GEMINI_API_KEYS.length <= 1) return;
-  geminiKeyIndex = (geminiKeyIndex + 1) % GEMINI_API_KEYS.length;
-}
-
-function shouldRotateKey(error: unknown): boolean {
-  const msg =
-    typeof error === 'object' && error && 'message' in error
-      ? String((error as { message?: unknown }).message)
-      : String(error);
-  // Catch common quota / rate limit / key issues.
-  return (
-    msg.includes('429') ||
-    msg.toLowerCase().includes('resource_exhausted') ||
-    msg.toLowerCase().includes('quota') ||
-    msg.toLowerCase().includes('rate') ||
-    msg.toLowerCase().includes('limit') ||
-    msg.toLowerCase().includes('api key not valid') ||
-    msg.toLowerCase().includes('permission') ||
-    msg.toLowerCase().includes('unauth')
-  );
-}
-
-async function withGeminiKeyRotation<T>(fn: (genAI: GoogleGenerativeAI) => Promise<T>): Promise<T> {
-  let lastError: unknown;
-  const attempts = Math.max(1, GEMINI_API_KEYS.length);
-
-  for (let i = 0; i < attempts; i++) {
-    const key = getCurrentGeminiKey();
-    const client = getClientForKey(key);
-    try {
-      return await fn(client);
-    } catch (err) {
-      lastError = err;
-      if (GEMINI_API_KEYS.length > 1 && shouldRotateKey(err)) {
-        rotateGeminiKey();
-        continue;
-      }
-      throw err;
-    }
-  }
-
-  throw lastError instanceof Error ? lastError : new Error(String(lastError));
-}
-
 type InlineDataPart = { inlineData: { data: string; mimeType: string } };
 type GenerateContentInput = Array<string | InlineDataPart>;
 
-async function generateContentWithRotation(input: GenerateContentInput) {
-  return withGeminiKeyRotation(async (genAI) => {
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
-    return model.generateContent(input);
+function getProxyUrl(): string {
+  const configured =
+    (import.meta.env.VITE_GEMINI_PROXY_URL as string | undefined) ?? '';
+  return configured || '/api/gemini';
+}
+
+async function callGeminiProxy(input: GenerateContentInput): Promise<string> {
+  const url = getProxyUrl();
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contents: input }),
   });
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => '');
+    throw new Error(
+      `Gemini proxy returned ${response.status}: ${body || response.statusText}`
+    );
+  }
+
+  const data = (await response.json()) as { text?: string };
+  if (!data || typeof data.text !== 'string') {
+    throw new Error('Gemini proxy returned an invalid response');
+  }
+  return data.text;
+}
+
+async function generateContentWithProxy(input: GenerateContentInput) {
+  // Key rotation happens server-side in the Netlify function.
+  return callGeminiProxy(input);
 }
 
 // Helper function to translate hazards to Malayalam and Hindi
@@ -173,12 +118,11 @@ export async function analyzeImage(base64Image: string, language: string = 'en')
     const compressedData = compressed.split(',')[1] || imageData;
 
     // First, analyze for hazards in English for consistent detection
-    const hazardResult = await generateContentWithRotation([
+    const hazardText = await generateContentWithProxy([
       'Analyze this image for any potential hazards or dangers that a visually impaired person should be warned about. Focus on immediate threats like weapons, vehicles, obstacles, or dangerous situations. Respond with ONLY the hazards in a comma-separated list. If no hazards are found, respond with "NONE".',
       { inlineData: { data: compressedData, mimeType: 'image/jpeg' } }
     ]);
     
-    const hazardText = hazardResult.response.text();
     const hazards = hazardText === 'NONE' ? [] : hazardText.split(',').map(h => h.trim());
 
     // Get scene description with specific language instructions
@@ -190,11 +134,11 @@ export async function analyzeImage(base64Image: string, language: string = 'en')
       descriptionPrompt = `इस दृश्य का एक प्राकृतिक हिंदी भाषा में वर्णन करें (50 शब्दों से कम में)। उचित हिंदी व्याकरण और प्राकृतिक वाक्य रचना का उपयोग करें। मुख्य तत्वों और उनकी व्यवस्था का वर्णन करें। केवल देवनागरी लिपि में उत्तर दें।`;
     }
 
-    const descResult = await generateContentWithRotation([
+    const descriptionText = await generateContentWithProxy([
       descriptionPrompt,
-      { inlineData: { data: imageData, mimeType: 'image/jpeg' } }
+      { inlineData: { data: compressedData, mimeType: 'image/jpeg' } }
     ]);
-    const description = descResult.response.text().split(/[.!?]/, 1)[0].trim();
+    const description = descriptionText.split(/[.!?]/, 1)[0].trim();
 
     // Extract objects from the description (keep in English for consistency)
     const commonObjects = ['person', 'chair', 'table', 'computer', 'phone', 'book', 'window', 'door', 'wall', 'desk', 'lamp', 'screen', 'monitor', 'keyboard', 'mouse', 'headphone', 'camera', 'wire', 'cable', 'jacket', 'shirt', 'pants', 'shoes'];
@@ -228,12 +172,11 @@ export async function analyzeForNavigation(base64Image: string, language: string
     const compressedData = compressed.split(',')[1] || imageData;
 
     // First, analyze for hazards in English for consistent detection
-    const hazardResult = await generateContentWithRotation([
+    const hazardText = await generateContentWithProxy([
       'Analyze this image for any potential hazards or dangers that a visually impaired person should be warned about while navigating. Focus on immediate obstacles, steps, uneven surfaces, or moving objects. Respond with ONLY the hazards in a comma-separated list. If no hazards are found, respond with "NONE".',
       { inlineData: { data: compressedData, mimeType: 'image/jpeg' } }
     ]);
     
-    const hazardText = hazardResult.response.text();
     const hazards = hazardText === 'NONE' ? [] : hazardText.split(',').map(h => h.trim());
 
     // Get navigation guidance with specific language instructions
@@ -245,11 +188,11 @@ export async function analyzeForNavigation(base64Image: string, language: string
       navigationPrompt = `एक दृष्टिबाधित व्यक्ति के लिए प्राकृतिक हिंदी भाषा में नेविगेशन मार्गदर्शन प्रदान करें। सुरक्षित रास्तों, बचने योग्य बाधाओं और सुझाए गए दिशाओं की जानकारी शामिल करें। 50 शब्दों से कम में और केवल देवनागरी लिपि में उत्तर दें।`;
     }
 
-    const navResult = await generateContentWithRotation([
+    const navigationText = await generateContentWithProxy([
       navigationPrompt,
-      { inlineData: { data: imageData, mimeType: 'image/jpeg' } }
+      { inlineData: { data: compressedData, mimeType: 'image/jpeg' } }
     ]);
-    const navigation = navResult.response.text().split(/[.!?]/, 1)[0].trim();
+    const navigation = navigationText.split(/[.!?]/, 1)[0].trim();
 
     return {
       navigation,

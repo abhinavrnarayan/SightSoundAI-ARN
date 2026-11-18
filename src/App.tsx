@@ -42,6 +42,7 @@ function App() {
   const lastInteractionTimeRef = useRef<number>(Date.now());
   const lastCaptureTimeRef = useRef<number>(0);
   const CAPTURE_COOLDOWN_MS = 6000; // Minimum gap between auto-captures
+  const firstCaptureRef = useRef<boolean>(false);
 
   const t = translations[language];
 
@@ -335,6 +336,13 @@ function App() {
   useEffect(() => {
     const interval = 10;
     let timeLeft = interval;
+
+    // Capture immediately on mount to remove the initial ~10s delay.
+    if (!firstCaptureRef.current && !isPaused && !isSpeaking) {
+      firstCaptureRef.current = true;
+      lastCaptureTimeRef.current = Date.now();
+      handleCapture();
+    }
 
     analysisIntervalRef.current = window.setInterval(() => {
       // Pause auto-capture when the tab is hidden (user switched away / minimized).
