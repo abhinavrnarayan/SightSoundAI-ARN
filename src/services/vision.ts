@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { trackKeyRotation } from '../firebase';
+import { parseAnalysisResponse } from './analysisParser';
 
 // Downscale webcam screenshots before sending to Gemini.
 // Smaller payload = faster upload, fewer tokens, quicker responses.
@@ -178,18 +179,18 @@ function buildAnalysisPrompt(mode: 'scene' | 'navigation', language: string): st
     if (language === 'ml') {
       return `നാവിഗേഷൻ വിശകലനം ചെയ്യുക:
 HAZARDS: അപകടങ്ങളുടെ പട്ടിക, അല്ലെങ്കിൽ "NONE".
-NAVIGATION: സുരക്ഷിതമായ വഴി, ഒഴിവാക്കേണ്ട തടസ്സങ്ങൾ, നിർദ്ദേശിക്കുന്ന ദിശ (50 വാക്കിൽ താഴെ), മലയാളത്തിൽ മാത്രം.
+NAVIGATION: നേരിൽ ഉള്ളവ, ഒഴിവാക്കേണ്ട തടസ്സങ്ങൾ, അടുത്ത നടപ്പ് (50 വാക്കിൽ താഴെ), മലയാളത്തിൽ മാത്രം.
 ഉത്തരം മലയാളത്തിൽ മാത്രം നൽകുക.`
     }
     if (language === 'hi') {
       return `नेविगेशन विश्लेषण करें:
 HAZARDS: खतरों की कॉमा-सेपरेटेड सूची, या "NONE".
-NAVIGATION: सुरक्षित रास्ता, बचने योग्य बाधाएं, सुझाई गई दिशा (50 शब्दों से कम), हिंदी में केवल देवनागरी लिपि में.
+NAVIGATION: सामने क्या है, किन बाधाओं से बचें, और अगला कदम (50 शब्दों से कम), हिंदी में केवल देवनागरी लिपि में.
 उत्तर केवल हिंदी में दें।`
     }
     return `Analyze this scene for navigation guidance for a visually impaired person.
 HAZARDS: comma-separated list of immediate hazards (steps, uneven surfaces, obstacles, vehicles, moving objects), or "NONE" if none.
-NAVIGATION: clear, concise navigation guidance - safe path, obstacles to avoid, suggested direction (under 50 words).
+NAVIGATION: what is directly ahead within two steps, what to avoid, and the next step to take, for example "a chair is one step ahead on the left, step right to pass it" (under 50 words).
 Respond in English only. Format exactly as shown above.`;
   }
 
@@ -197,99 +198,25 @@ Respond in English only. Format exactly as shown above.`;
   if (language === 'ml') {
     return `ദൃശ്യവിശകലനം നടത്തുക:
 HAZARDS: അപകടങ്ങൾ, അല്ലെങ്കിൽ "NONE".
-DESCRIPTION: ദൃശ്യത്തിന്റെ ഒരു വ്യക്തമായ വിവരണം (50 വാക്കിൽ താഴെ), മലയാളത്തിൽ മാത്രം.
-OBJECTS: അവിടെ കാണുന്ന വസ്തുക്കൾ (ഇംഗ്ലീഷിൽ).
+DESCRIPTION: ദൃശ്യത്തിന്റെ ഒരു വ്യക്തമായ വിവരണം, സ്ഥാനങ്ങളും ഉൾപ്പെടുത്തി (50 വാക്കിൽ താഴെ), മലയാളത്തിൽ മാത്രം.
+OBJECTS: അവിടെ കാണുന്ന വസ്തുക്കൾ അവയുടെ സ്ഥാനവും ഉൾപ്പെടുത്തി (ഇംഗ്ലീഷിൽ).
 ഉത്തരം മലയാളത്തിൽ മാത്രം നൽകുക.`
   }
   if (language === 'hi') {
     return `दृश्य विश्लेषण करें:
 HAZARDS: खतरे, या "NONE".
-DESCRIPTION: दृश्य का एक वाक्य विवरण (50 शब्दों से कम), केवल देवनागरी लिपि में हिंदी में.
-OBJECTS: दिखने वाली वस्तुएं (अंग्रेजी में).
+DESCRIPTION: दृश्य का एक वाक्य विवरण, स्थानों के साथ (50 शब्दों से कम), केवल देवनागरी लिपि में हिंदी में.
+OBJECTS: दिखने वाली वस्तुएं और उनके स्थान (अंग्रेजी में).
 उत्तर केवल हिंदी में दें।`
   }
   return `Analyze this scene for a visually impaired person.
 HAZARDS: comma-separated list of immediate hazards, or "NONE" if none.
-DESCRIPTION: one clear sentence describing the scene (under 50 words).
-OBJECTS: comma-separated list of objects visible in English.
+DESCRIPTION: one clear sentence describing what is ahead, with positions such as left, right, centre, near or far (under 50 words).
+OBJECTS: comma-separated list of objects with their position, for example "door ahead, chair left".
 Respond in English only. Format exactly as shown above.`;
 }
 
-function parseAnalysisResponse(text: string, mode: 'scene' | 'navigation', language: string) {
-  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
-  let hazards = '';
-  let description = '';
-  let objects = '';
-  let navigation = '';
-
-  for (const line of lines) {
-    const upper = line.toUpperCase();
-    if (upper.startsWith('HAZARDS:')) {
-      hazards = line.slice('HAZARDS:'.length).trim();
-    } else if (upper.startsWith('DESCRIPTION:')) {
-      description = line.slice('DESCRIPTION:'.length).trim();
-    } else if (upper.startsWith('OBJECTS:')) {
-      objects = line.slice('OBJECTS:'.length).trim();
-    } else if (upper.startsWith('NAVIGATION:')) {
-      navigation = line.slice('NAVIGATION:'.length).trim();
-    }
-  }
-
-  const hazardList =
-    hazards === 'NONE' || !hazards
-      ? []
-      : hazards.split(',').map((h) => h.trim()).filter(Boolean);
-
-  const objectList = objects
-    ? objects.split(',').map((o) => o.trim()).filter(Boolean)
-    : [];
-
-  return {
-    hazards:
-      language === 'en'
-        ? hazardList
-        : translateHazardsToLanguage(hazardList, language),
-    description,
-    objects: objectList,
-    navigation,
-  };
-}
-
-// Helper function to translate hazards to Malayalam and Hindi
-const translateHazardsToLanguage = (hazards: string[], language: string): string[] => {
-  const hazardTranslations: { [key: string]: { ml: string; hi: string } } = {
-    'stairs': { ml: 'പടികൾ', hi: 'सीढ़ियां' },
-    'step': { ml: 'പടി', hi: 'सीढ़ी' },
-    'uneven surface': { ml: 'അസമമായ പ്രതലം', hi: 'असमान सतह' },
-    'obstacle': { ml: 'തടസ്സം', hi: 'बाधा' },
-    'moving object': { ml: 'ചലിക്കുന്ന വസ്തു', hi: 'चलती वस्तु' },
-    'vehicle': { ml: 'വാഹനം', hi: 'वाहन' },
-    'person': { ml: 'വ്യക്തി', hi: 'व्यक्ति' },
-    'crowd': { ml: 'ജനക്കൂട്ടം', hi: 'भीड़' },
-    'water': { ml: 'വെള്ളം', hi: 'पानी' },
-    'hole': { ml: 'കുഴി', hi: 'गड्ढा' },
-    'construction': { ml: 'നിർമ്മാണം', hi: 'निर्माण' },
-    'wet floor': { ml: 'നനഞ്ഞ തറ', hi: 'गीला फर्श' },
-    'traffic': { ml: 'ഗതാഗതം', hi: 'यातायात' },
-    'door': { ml: 'വാതിൽ', hi: 'दरवाजा' },
-    'wall': { ml: 'ചുമർ', hi: 'दीवार' },
-    'furniture': { ml: 'ഫർണിച്ചർ', hi: 'फर्नीचर' },
-    'glass': { ml: 'ഗ്ലാസ്', hi: 'कांच' },
-    'sharp object': { ml: 'മൂർച്ചയുള്ള വസ്തു', hi: 'तेज वस्तु' },
-    'electric': { ml: 'വൈദ്യുതി', hi: 'बिजली' },
-    'hot surface': { ml: 'ചൂടുള്ള പ്രതലം', hi: 'गर्म सतह' }
-  };
-
-  return hazards.map(hazard => {
-    const lowerHazard = hazard.toLowerCase();
-    for (const [eng, translations] of Object.entries(hazardTranslations)) {
-      if (lowerHazard.includes(eng)) {
-        return translations[language as 'ml' | 'hi'] || hazard;
-      }
-    }
-    return hazard;
-  });
-};
+/** The parser reads the labelled answer. It lives in its own module. */
 
 /** Compresses a webcam frame and returns the base64 payload for the API. */
 export async function prepareImageForApi(base64Image: string): Promise<string> {

@@ -440,10 +440,10 @@ function App() {
       parts.push(result.description);
     }
 
-    // Mention key objects naturally
+    // Mention key objects with their positions
     if (result.objects && result.objects.length > 0) {
       const objectList = result.objects.slice(0, 5).join(', ');
-      parts.push(`I can see ${objectList} nearby.`);
+      parts.push(`I can see ${objectList}.`);
     }
 
     // Hazards come first if any - critical for safety
