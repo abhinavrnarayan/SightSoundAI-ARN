@@ -27,7 +27,13 @@ import {
 import SpeechRecognition, {
   useSpeechRecognition,
 } from "react-speech-recognition";
-import { analyzeImage, analyzeForNavigation } from "./services/vision";
+import {
+  analyzeImage,
+  analyzeForNavigation,
+  askAboutScene,
+  ConversationTurn,
+} from "./services/vision";
+import { matchVoiceCommand, VoiceCommandId } from "./voice/commandRouter";
 import { VoiceSettings } from "./components/VoiceSettings";
 import { Tab } from "./components/Tab";
 import { translations, Language } from "./translations";
@@ -45,10 +51,24 @@ function App() {
   const [isPaused, setIsPaused] = useState(false);
   const [mode, setMode] = useState<"scene" | "navigation">("scene");
   const [language, setLanguage] = useState<Language>("en");
+  const [conversation, setConversation] = useState<ConversationTurn | null>(null);
+  const [isThinking, setIsThinking] = useState(false);
   const webcamRef = useRef<Webcam>(null);
   const speechRef = useRef<SpeechSynthesisUtterance | null>(null);
   const analysisIntervalRef = useRef<number | null>(null);
-  const isPausedRef = useRef<boolean>(false); // mirrors isPaused for callbacks that run later
+
+  // Live values for the callbacks that run outside the React render cycle.
+  // A callback that reads a state value from its closure keeps the value from
+  // the render that created it, which freezes the mode and the language.
+  const isPausedRef = useRef<boolean>(false);
+  const isSpeakingRef = useRef<boolean>(false);
+  const isCapturingRef = useRef<boolean>(false);
+  const modeRef = useRef<"scene" | "navigation">("scene");
+  const languageRef = useRef<Language>("en");
+  const isThinkingRef = useRef<boolean>(false); // one question at a time
+
+  const conversationHistoryRef = useRef<ConversationTurn[]>([]);
+  const lastUtteranceRef = useRef<{ text: string; at: number }>({ text: "", at: 0 });
   const imageAnalysisCountRef = useRef<number>(0);
   const totalSpeakingTimeRef = useRef<number>(0);
   const speakingStartTimeRef = useRef<number | null>(null);
@@ -68,10 +88,15 @@ function App() {
   } | null>(null);
   const welcomeSpokenRef = useRef<boolean>(false);
 
+  // The capture callback and the speech callback call each other. The speech
+  // function is reached through this ref, so the cycle never freezes.
+  const speakRef = useRef<(text: string, isCommand: boolean) => void>(() => {});
+
   const t = translations[language];
 
   const handleModeSwitch = (newMode: "scene" | "navigation") => {
     const previousMode = mode;
+    modeRef.current = newMode;
     setMode(newMode);
     // A preloaded result belongs to the old mode. Drop it so it is not spoken.
     preloadedAnalysisRef.current = null;
@@ -93,6 +118,7 @@ function App() {
     const newLang = languages[nextIndex];
 
     const previous = language;
+    languageRef.current = newLang;
     setLanguage(newLang);
     localStorage.setItem("language", newLang);
 
@@ -124,9 +150,14 @@ function App() {
     // Drop any analysis prepared before the stop so it is not spoken later.
     preloadedAnalysisRef.current = null;
 
+    // Drop the old handlers first. A cancelled utterance still fires "onend",
+    // and that stale callback must not resume the app.
+    if (speechRef.current) {
+      speechRef.current.onend = null;
+      speechRef.current.onstart = null;
+    }
     window.speechSynthesis.cancel();
     setIsSpeaking(false);
-
     // Calculate interrupted speaking time
     let interruptedDuration = 0;
     if (speakingStartTimeRef.current) {
@@ -156,6 +187,7 @@ function App() {
   useEffect(() => {
     const savedLang = localStorage.getItem("language") as Language;
     if (savedLang && ["en", "ml", "hi"].includes(savedLang)) {
+      languageRef.current = savedLang;
       setLanguage(savedLang);
       // Track initial language preference
       updateUserProperties({ preferred_language: savedLang });
@@ -211,6 +243,139 @@ function App() {
     };
   }, []);
 
+  // Answers a spoken question about what the user sees right now.
+  const handleQuestion = async (question: string) => {
+    if (!isStarted || isPausedRef.current || isThinkingRef.current) return;
+    isThinkingRef.current = true;
+    setIsThinking(true);
+    setConversation({ question, answer: "" });
+
+    // The question takes priority over the current narration.
+    if (speechRef.current) {
+      speechRef.current.onend = null;
+      speechRef.current.onstart = null;
+      window.speechSynthesis.cancel();
+      setIsSpeaking(false);
+    }
+
+    const startedAt = performance.now();
+    try {
+      // A fresh frame answers the question about what the user sees now.
+      const imageSrc = webcamRef.current ? webcamRef.current.getScreenshot() : null;
+      const answer = await askAboutScene(
+        question,
+        imageSrc,
+        language,
+        conversationHistoryRef.current,
+      );
+      if (isPausedRef.current) return;
+
+      // Keep a few turns so a follow-up question understands the last answer.
+      conversationHistoryRef.current = [
+        ...conversationHistoryRef.current,
+        { question, answer },
+      ].slice(-3);
+      setConversation({ question, answer });
+      speak(answer, false);
+
+      trackPerformance("question_answer", Math.round(performance.now() - startedAt));
+      trackVoiceCommand("question", language, true, {
+        question_length: question.length,
+        answer_length: answer.length,
+      });
+    } catch (error) {
+      console.error("Error answering question:", error);
+      trackError(error instanceof Error ? error : new Error(String(error)), {
+        language,
+      });
+      speak(t.errorAnswering, true);
+    } finally {
+      isThinkingRef.current = false;
+      setIsThinking(false);
+    }
+  };
+
+  // Runs one voice command.
+  const runVoiceCommand = (command: VoiceCommandId) => {
+    switch (command) {
+      case "start":
+        startApp();
+        return;
+      case "stop":
+        pauseApp();
+        return;
+      case "restart":
+        // Restart also resumes from the welcome screen.
+        if (!isStarted) {
+          startApp();
+          return;
+        }
+        resumeApp();
+        return;
+      case "scene":
+      case "navigation": {
+        if (!isStarted) return;
+        const newMode = command === "scene" ? "scene" : "navigation";
+        // While narrating, wait for the narration to end so it is not cut off.
+        if (isSpeaking) {
+          voiceCommandRef.current = { onCommand: () => handleModeSwitch(newMode) };
+          return;
+        }
+        handleModeSwitch(newMode);
+        return;
+      }
+      case "hazards": {
+        if (!isStarted || !analysis?.hazards) return;
+        const response =
+          analysis.hazards.length > 0
+            ? t.detectedHazards(analysis.hazards)
+            : t.noHazards;
+        speak(response, true);
+
+        trackVoiceCommand("hazards", language, true, {
+          hazards_found: analysis.hazards.length > 0,
+          hazard_count: analysis.hazards.length,
+        });
+        trackEngagement("voice_command", {
+          command: "hazards_query",
+          language: language,
+          hazards_found: analysis.hazards.length > 0,
+          hazard_count: analysis.hazards.length,
+          mode: mode,
+        });
+        return;
+      }
+      case "language":
+        if (!isStarted) return;
+        handleLanguageToggle();
+        return;
+    }
+  };
+
+  // Every utterance arrives through one command. The router decides whether it
+  // is a command or a question for the assistant.
+  const handleUtterance = (raw: string) => {
+    const text = (raw || "").trim();
+    if (!text) return;
+
+    // The browser can send the same final result twice. Ignore the repeat.
+    const now = Date.now();
+    if (
+      lastUtteranceRef.current.text === text &&
+      now - lastUtteranceRef.current.at < 1500
+    ) {
+      return;
+    }
+    lastUtteranceRef.current = { text, at: now };
+
+    const command = matchVoiceCommand(text);
+    if (command) {
+      runVoiceCommand(command);
+      return;
+    }
+    void handleQuestion(text);
+  };
+
   const {
     listening,
     browserSupportsSpeechRecognition,
@@ -218,153 +383,10 @@ function App() {
   } = useSpeechRecognition({
     commands: [
       {
-        command: [
-          "switch to navigation",
-          "navigation mode",
-          "enable navigation",
-          "start navigation",
-          "begin navigation",
-          "navigate",
-          "नेविगेशन",
-          "नेविगेट",
-          "നാവിഗേഷൻ",
-          "നാവിഗേഷൻ മോഡ്",
-        ],
-        callback: () => {
-          if (!isStarted) return;
-          // While narrating, wait for the narration to end so it is not cut off.
-          if (isSpeaking) {
-            voiceCommandRef.current = { onCommand: () => handleModeSwitch("navigation") };
-            return;
-          }
-          handleModeSwitch("navigation");
-        },
-        isFuzzyMatch: true,
-        fuzzyMatchingThreshold: 0.7,
-        bestMatchOnly: true,
-      },
-      {
-        command: [
-          "switch to scene",
-          "scene mode",
-          "scene description",
-          "enable scene",
-          "start scene",
-          "describe scene",
-          "what do you see",
-          "दृश्य विवरण",
-          "दृश्य मोड",
-          "ദൃശ്യ വിവരണം",
-          "സീൻ മോഡ്",
-        ],
-        callback: () => {
-          if (!isStarted) return;
-          // While narrating, wait for the narration to end so it is not cut off.
-          if (isSpeaking) {
-            voiceCommandRef.current = { onCommand: () => handleModeSwitch("scene") };
-            return;
-          }
-          handleModeSwitch("scene");
-        },
-        isFuzzyMatch: true,
-        fuzzyMatchingThreshold: 0.7,
-        bestMatchOnly: true,
-      },
-      {
-        command: [
-          "start",
-          "begin",
-          "start app",
-          "开始",
-          "शुरू करें",
-          "തുടங்கുക",
-        ],
-        callback: () => {
-          startApp();
-        },
-        // Exact match only. A fuzzy match also catches "restart" and "begin navigation".
-      },
-      {
-        command: [
-          "stop",
-          "pause",
-          "stop app",
-          "रोकें",
-          "നിർത്തുക",
-        ],
-        callback: () => {
-          pauseApp();
-        },
-        // Exact match only. A fuzzy match also catches "restart" and "begin navigation".
-      },
-      {
-        command: [
-          "restart",
-          "resume",
-          "continue",
-          "पुनः शुरू करें",
-          "മulai ചെയ്യുക",
-        ],
-        callback: () => {
-          // Restart also resumes from the welcome screen.
-          if (!isStarted) {
-            startApp();
-            return;
-          }
-          resumeApp();
-        },
-        // Exact match only. A fuzzy match also catches "start".
-      },
-      {
-        command: [
-          "hazards",
-          "dangers",
-          "what are the hazards",
-          "any dangers",
-          "खतरे",
-          "कोई खतरा",
-          "അപകടങ്ങൾ",
-          "അപകട സാധ്യതകൾ",
-        ],
-        callback: () => {
-          if (!isStarted) return;
-          if (analysis?.hazards) {
-            const response =
-              analysis.hazards.length > 0
-                ? t.detectedHazards(analysis.hazards)
-                : t.noHazards;
-            speak(response, true);
-
-            // Track voice command for hazards
-            trackVoiceCommand("hazards", language, true, {
-              hazards_found: analysis.hazards.length > 0,
-              hazard_count: analysis.hazards.length,
-            });
-            trackEngagement("voice_command", {
-              command: "hazards_query",
-              language: language,
-              hazards_found: analysis.hazards.length > 0,
-              hazard_count: analysis.hazards.length,
-              mode: mode,
-            });
-          }
-        },
-      },
-      {
-        command: [
-          "switch language",
-          "change language",
-          "toggle language",
-          "भाषा बदलें",
-          "ഭാഷ മാറ്റുക",
-        ],
-        callback: () => {
-          if (!isStarted) return;
-          handleLanguageToggle();
-        },
-        isFuzzyMatch: true,
-        fuzzyMatchingThreshold: 0.6,
-        bestMatchOnly: true,
+        // The wildcard catches every utterance, so a question can reach the
+        // assistant instead of being dropped.
+        command: "*",
+        callback: (utterance: string) => handleUtterance(utterance),
       },
     ],
   });
@@ -430,14 +452,18 @@ function App() {
   }
 
   const handleCapture = useCallback(async () => {
-    if (isPaused) return;
+    if (isPausedRef.current || isCapturingRef.current) return;
 
     // The camera needs a moment to start. A missing frame is not an error,
     // so the next tick tries again instead of losing the capture slot.
     const imageSrc = webcamRef.current ? webcamRef.current.getScreenshot() : null;
     if (!imageSrc) return;
 
+    const currentMode = modeRef.current;
+    const currentLanguage = languageRef.current;
+
     lastCaptureTimeRef.current = Date.now();
+    isCapturingRef.current = true;
     setIsCapturing(true);
     const analysisStartTime = performance.now();
 
@@ -447,13 +473,13 @@ function App() {
 
       // Track engagement
       trackEngagement("image_capture", {
-        mode,
-        language,
+        mode: currentMode,
+        language: currentLanguage,
         analysis_count: imageAnalysisCountRef.current,
       });
 
-      if (mode === "navigation") {
-        const result = await analyzeForNavigation(imageSrc, language);
+      if (currentMode === "navigation") {
+        const result = await analyzeForNavigation(imageSrc, currentLanguage);
         if (isPausedRef.current) return; // stopped while the request was in flight
         const analysisDuration = Math.round(performance.now() - analysisStartTime);
         const analysisResult = {
@@ -467,7 +493,7 @@ function App() {
         // Track navigation analysis with performance metrics
         trackEvent("image_analyzed", {
           mode: "navigation",
-          language: language,
+          language: currentLanguage,
           hazards_detected: result.hazards.length,
           hazard_types: result.hazards.join(","),
           has_navigation_guidance: !!result.navigation,
@@ -479,7 +505,7 @@ function App() {
         // Track performance
         trackPerformance("navigation_analysis", analysisDuration);
 
-        if (isSpeaking) {
+        if (isSpeakingRef.current) {
           // Still narrating. Store the result for the next turn.
           preloadedAnalysisRef.current = analysisResult;
         } else {
@@ -492,12 +518,12 @@ function App() {
             navigation: result.navigation,
           });
 
-          if (!isPaused) {
-            speak(buildNavigationSpeech(result), false);
+          if (!isPausedRef.current) {
+            speakRef.current(buildNavigationSpeech(result), false);
           }
         }
       } else {
-        const result = await analyzeImage(imageSrc, language);
+        const result = await analyzeImage(imageSrc, currentLanguage);
         if (isPausedRef.current) return; // stopped while the request was in flight
         const analysisDuration = Math.round(performance.now() - analysisStartTime);
         const analysisResult = {
@@ -511,7 +537,7 @@ function App() {
         // Track scene analysis with performance metrics
         trackEvent("image_analyzed", {
           mode: "scene",
-          language: language,
+          language: currentLanguage,
           hazards_detected: result.hazards.length,
           hazard_types: result.hazards.join(","),
           objects_detected: result.objects.length,
@@ -524,7 +550,7 @@ function App() {
         // Track performance
         trackPerformance("scene_analysis", analysisDuration);
 
-        if (isSpeaking) {
+        if (isSpeakingRef.current) {
           // Still narrating. Store the result for the next turn.
           preloadedAnalysisRef.current = analysisResult;
         } else {
@@ -532,28 +558,29 @@ function App() {
           preloadedAnalysisRef.current = null;
           setAnalysis(result);
 
-          if (!isPaused) {
-            speak(buildSceneSpeech(result), false);
+          if (!isPausedRef.current) {
+            speakRef.current(buildSceneSpeech(result), false);
           }
         }
       }
     } catch (error) {
       const errorDuration = Math.round(performance.now() - analysisStartTime);
       console.error("Error analyzing image:", error);
-      
+
       // Track error with context
       trackError(error instanceof Error ? error : new Error(String(error)), {
-        mode,
-        language,
+        mode: currentMode,
+        language: currentLanguage,
         analysis_duration_ms: errorDuration,
         analysis_count: imageAnalysisCountRef.current,
       });
-      
-      speak(t.errorAnalyzing, true);
+
+      speakRef.current(translations[currentLanguage].errorAnalyzing, true);
     } finally {
+      isCapturingRef.current = false;
       setIsCapturing(false);
     }
-  }, [isPaused, isSpeaking, mode, language, t]);
+  }, []);
 
   // Auto-capture loop. It only runs after the user starts the app, so the
   // welcome screen never spends API calls.
@@ -564,7 +591,9 @@ function App() {
       // Pause auto-capture when the tab is hidden (user switched away / minimized).
       if (document.visibilityState === "hidden") return;
       // While narrating, the preload started in speak.onstart prepares the next result.
-      if (isPaused || isCapturing || isSpeaking) return;
+      if (isPausedRef.current || isCapturingRef.current || isSpeakingRef.current) return;
+      // A question is already using the camera and the API.
+      if (isThinkingRef.current) return;
       // Enforce a minimum cooldown between captures to avoid hammering the API.
       if (Date.now() - lastCaptureTimeRef.current < CAPTURE_COOLDOWN_MS) return;
 
@@ -577,7 +606,7 @@ function App() {
         analysisIntervalRef.current = null;
       }
     };
-  }, [handleCapture, isPaused, isSpeaking, isCapturing, isStarted]);
+  }, [handleCapture, isStarted]);
 
   // Track tab visibility changes (user switches away / back)
   useEffect(() => {
@@ -614,12 +643,25 @@ function App() {
     };
     events.forEach((name) => window.addEventListener(name, speakOnFirstPress, true));
     return () => events.forEach((name) => window.removeEventListener(name, speakOnFirstPress, true));
-  }, [isStarted, t.welcomeMessage]);
+  }, [isStarted, t.welcomeMessage, speak]);
 
-  // Keeps isPausedRef in step with state for callbacks that run later.
+  // Keeps the live values in step with the state. The capture and speech
+  // callbacks run outside the render cycle, so they read these refs.
   useEffect(() => {
     isPausedRef.current = isPaused;
   }, [isPaused]);
+
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
+
+  useEffect(() => {
+    languageRef.current = language;
+  }, [language]);
+
+  useEffect(() => {
+    isCapturingRef.current = isCapturing;
+  }, [isCapturing]);
 
   // No cleanup. Stopping here and starting again in the next effect run (hot reload,
   // StrictMode) leaves react-speech-recognition unable to restart, so voice dies.
@@ -629,13 +671,13 @@ function App() {
     }
   }, [browserSupportsSpeechRecognition]);
 
-  const speak = (text: string, isCommand: boolean) => {
+  const speak = useCallback((text: string, isCommand: boolean) => {
     if (speechRef.current) {
-      window.speechSynthesis.cancel();
-      // Drop the old handlers. A cancelled utterance still fires "onend",
+      // Drop the old handlers first. A cancelled utterance still fires "onend",
       // and that stale callback must not touch the new narration.
       speechRef.current.onend = null;
       speechRef.current.onstart = null;
+      window.speechSynthesis.cancel();
     }
 
     const voices = window.speechSynthesis.getVoices();
@@ -657,13 +699,14 @@ function App() {
     speechRef.current.pitch = savedPitch;
 
     speechRef.current.onstart = () => {
+      isSpeakingRef.current = true;
       setIsSpeaking(true);
       speakingStartTimeRef.current = performance.now();
 
       // Start preloading the next analysis immediately when TTS starts,
       // so it's ready by the time narration finishes (zero-latency transition).
       // Command speech (stop, start, mode) must not start an analysis.
-      if (!isCommand && !isPaused && webcamRef.current) {
+      if (!isCommand && !isPausedRef.current && webcamRef.current) {
         handleCapture();
       }
 
@@ -671,27 +714,28 @@ function App() {
       trackEngagement("speech_started", {
         text_length: text.length,
         is_command: isCommand,
-        language: language,
+        language: languageRef.current,
       });
     };
-    
+
     speechRef.current.onend = () => {
+      isSpeakingRef.current = false;
       setIsSpeaking(false);
-      
+
       // Calculate speaking duration
       if (speakingStartTimeRef.current) {
         const speakingDuration = Math.round(performance.now() - speakingStartTimeRef.current);
         totalSpeakingTimeRef.current += speakingDuration;
-        
+
         // Track speech completion
         trackEngagement("speech_completed", {
           text_length: text.length,
           speaking_duration_ms: speakingDuration,
           total_speaking_time_ms: totalSpeakingTimeRef.current,
           is_command: isCommand,
-          language: language,
+          language: languageRef.current,
         });
-        
+
         speakingStartTimeRef.current = null;
       }
 
@@ -704,7 +748,7 @@ function App() {
       }
 
       // If we preloaded the next analysis while speaking, use it now for zero-latency transition.
-      if (!isCommand && preloadedAnalysisRef.current && !isPaused) {
+      if (!isCommand && preloadedAnalysisRef.current && !isPausedRef.current) {
         const preloaded = preloadedAnalysisRef.current;
         preloadedAnalysisRef.current = null;
 
@@ -715,7 +759,7 @@ function App() {
             hazards: preloaded.hazards,
             navigation: preloaded.navigation,
           });
-          speak(buildNavigationSpeech(preloaded), false);
+          speakRef.current(buildNavigationSpeech(preloaded), false);
         } else {
           setAnalysis({
             objects: preloaded.objects,
@@ -723,13 +767,17 @@ function App() {
             hazards: preloaded.hazards,
             navigation: undefined,
           });
-          speak(buildSceneSpeech(preloaded), false);
+          speakRef.current(buildSceneSpeech(preloaded), false);
         }
       }
     };
 
     window.speechSynthesis.speak(speechRef.current);
-  };
+  }, [handleCapture]);
+
+  // The capture callback calls the speech function. Keep the ref in step so
+  // the callback always reaches the current speech function.
+  speakRef.current = speak;
 
   if (!browserSupportsSpeechRecognition) {
     return (
@@ -847,7 +895,9 @@ function App() {
           />
           <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-indigo-600/90 text-white px-4 py-2 rounded-full flex items-center gap-2 shadow-lg backdrop-blur-sm text-sm">
             <Camera className="w-5 h-5" />
-            {isCapturing
+            {isThinking
+              ? t.thinking
+              : isCapturing
               ? t.analyzing
               : isPaused
               ? t.listeningToCommand
@@ -863,6 +913,7 @@ function App() {
               active={mode === "scene"}
               onClick={() => {
                 const previousMode = mode;
+                modeRef.current = "scene";
                 setMode("scene");
                 trackEvent("mode_switched", {
                   from_mode: previousMode,
@@ -878,6 +929,7 @@ function App() {
               active={mode === "navigation"}
               onClick={() => {
                 const previousMode = mode;
+                modeRef.current = "navigation";
                 setMode("navigation");
                 trackEvent("mode_switched", {
                   from_mode: previousMode,
@@ -915,6 +967,24 @@ function App() {
             </p>
           </div>
         </div>
+
+        {(conversation || isThinking) && (
+          <div className="bg-gray-800/50 backdrop-blur-md rounded-2xl shadow-xl overflow-hidden ring-1 ring-white/10 p-4 text-white">
+            {conversation && (
+              <>
+                <p className="text-indigo-300 text-xs font-semibold uppercase tracking-wide mb-1">
+                  {t.youAsked}
+                </p>
+                <p className="text-white/70 text-sm mb-2">
+                  &ldquo;{conversation.question}&rdquo;
+                </p>
+              </>
+            )}
+            <p className="text-white/90 leading-relaxed text-sm">
+              {conversation?.answer || t.thinking}
+            </p>
+          </div>
+        )}
 
         <VoiceSettings onVoiceSettingsChange={(text) => speak(text, false)} />
 

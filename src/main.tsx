@@ -8,21 +8,26 @@ import "./index.css";
 // Pre-load voices when the page loads
 const loadVoices = () => {
   return new Promise<void>((resolve) => {
-    if (typeof window !== "undefined" && "speechSynthesis" in window) {
-      // If voices are already loaded, resolve immediately
-      if (window.speechSynthesis.getVoices().length > 0) {
-        resolve();
-        return;
-      }
-
-      // Wait for voices to be loaded
-      window.speechSynthesis.onvoiceschanged = () => {
-        window.speechSynthesis.getVoices();
-        resolve();
-      };
-    } else {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
       resolve();
+      return;
     }
+
+    // If voices are already loaded, resolve immediately
+    if (window.speechSynthesis.getVoices().length > 0) {
+      resolve();
+      return;
+    }
+
+    // Wait for voices to be loaded
+    window.speechSynthesis.onvoiceschanged = () => {
+      window.speechSynthesis.getVoices();
+      resolve();
+    };
+
+    // Some devices never load a voice and never fire the event. The app must
+    // still render, so the wait ends after a short delay.
+    setTimeout(resolve, 2000);
   });
 };
 

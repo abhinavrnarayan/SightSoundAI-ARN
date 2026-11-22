@@ -50,6 +50,11 @@ const GEMINI_API_KEYS = parseGeminiKeys();
 let geminiKeyIndex = 0;
 const geminiClients = new Map<string, GoogleGenerativeAI>();
 
+// The newest flash-lite model answers a scene in about 1.4s, and it is the
+// only model that every key in .env can reach. The older flash model stays as
+// a fallback for a key or a project that cannot serve the newer one.
+const GEMINI_MODELS = ['gemini-3.5-flash-lite', 'gemini-2.5-flash'];
+
 function getClientForKey(key: string): GoogleGenerativeAI {
   const existing = geminiClients.get(key);
   if (existing) return existing;
@@ -73,49 +78,83 @@ function rotateGeminiKey(reason: string) {
   trackKeyRotation(reason);
 }
 
-function shouldRotateKey(error: unknown): boolean {
+/**
+ * Sorts a failure into the action that can fix it.
+ *
+ * "model" means the model cannot serve this key. Another model can serve it.
+ * "key" means the key is exhausted, blocked or busy. Another key can serve it.
+ * "fatal" means the request itself is wrong, so a retry cannot help.
+ */
+function classifyGeminiError(error: unknown): 'model' | 'key' | 'fatal' {
   const msg =
     typeof error === 'object' && error && 'message' in error
       ? String((error as { message?: unknown }).message)
       : String(error);
   const lower = msg.toLowerCase();
-  return (
+
+  if (
+    msg.includes('404') ||
+    (lower.includes('model') && (lower.includes('not found') || lower.includes('not available')))
+  ) {
+    return 'model';
+  }
+
+  if (
     msg.includes('429') ||
+    msg.includes('503') ||
     lower.includes('resource_exhausted') ||
     lower.includes('quota') ||
-    lower.includes('rate') ||
-    lower.includes('limit') ||
+    lower.includes('rate limit') ||
+    lower.includes('too many requests') ||
+    lower.includes('high demand') ||
+    lower.includes('overloaded') ||
+    lower.includes('unavailable') ||
     lower.includes('api key not valid') ||
     lower.includes('permission') ||
-    lower.includes('unauth') ||
-    // The free tier returns 503 when the model is under heavy load.
-    // Another key usually serves the request straight away.
-    msg.includes('503') ||
-    lower.includes('unavailable') ||
-    lower.includes('overloaded') ||
-    lower.includes('high demand')
-  );
+    lower.includes('unauth')
+  ) {
+    return 'key';
+  }
+
+  return 'fatal';
 }
 
-async function withGeminiKeyRotation<T>(fn: (genAI: GoogleGenerativeAI) => Promise<T>): Promise<T> {
+function rotationReason(error: unknown): string {
+  const msg = String((error as { message?: unknown })?.message ?? '').toLowerCase();
+  if (msg.includes('503') || msg.includes('high demand') || msg.includes('overloaded')) {
+    return 'model_unavailable';
+  }
+  if (msg.includes('401') || msg.includes('403') || msg.includes('api key') || msg.includes('permission')) {
+    return 'key_rejected';
+  }
+  return 'quota_or_rate_limit';
+}
+
+async function withGeminiRetry<T>(
+  fn: (genAI: GoogleGenerativeAI, model: string) => Promise<T>
+): Promise<T> {
   let lastError: unknown;
   const attempts = Math.max(1, GEMINI_API_KEYS.length);
 
   for (let i = 0; i < attempts; i++) {
     const key = getCurrentGeminiKey();
     const client = getClientForKey(key);
-    try {
-      return await fn(client);
-    } catch (err) {
-      lastError = err;
-      if (GEMINI_API_KEYS.length > 1 && shouldRotateKey(err)) {
-        const reason = String((err as { message?: unknown })?.message ?? '').includes('503')
-          ? 'model_unavailable'
-          : 'quota_or_rate_limit';
-        rotateGeminiKey(reason);
-        continue;
+    for (let m = 0; m < GEMINI_MODELS.length; m++) {
+      try {
+        return await fn(client, GEMINI_MODELS[m]!);
+      } catch (err) {
+        lastError = err;
+        const kind = classifyGeminiError(err);
+        if (kind === 'model') {
+          // This model cannot serve this key. Try the next model.
+          continue;
+        }
+        if (kind === 'key' && GEMINI_API_KEYS.length > 1) {
+          rotateGeminiKey(rotationReason(err));
+          break;
+        }
+        throw err;
       }
-      throw err;
     }
   }
 
@@ -126,9 +165,9 @@ type InlineDataPart = { inlineData: { data: string; mimeType: string } };
 type GenerateContentInput = Array<string | InlineDataPart>;
 
 async function generateContentWithRotation(input: GenerateContentInput) {
-  return withGeminiKeyRotation(async (genAI) => {
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
-    return model.generateContent(input);
+  return withGeminiRetry(async (genAI, model) => {
+    const generativeModel = genAI.getGenerativeModel({ model });
+    return generativeModel.generateContent(input);
   });
 }
 
@@ -137,10 +176,10 @@ async function generateContentWithRotation(input: GenerateContentInput) {
 function buildAnalysisPrompt(mode: 'scene' | 'navigation', language: string): string {
   if (mode === 'navigation') {
     if (language === 'ml') {
-      return `നavioigate ചെയ്യുന്ന ദൃശ്യവിശകലനം നടത്തുക. നിഗംനിത്മാര-ൽ puestos:
-HAZARDS: അപകടങ്ങളുടെкомма-vigraṇicka പട്ടിക, അല്ലെങ്കിൽ "NONE".
-NAVIGATION: സുരക്ഷित പാത, ഒഴിവാക്കേണ്ട തടസ്സങ്ങൾ, ദിശ (50 വാക്കിൽ താഴെ), മലയാളത്തിൽ മാത്രം.
-ഉത്തരം ഇங்க്‌ലീഷ്‌ Männern respuesta നൽകേണ്ടതില്ല.`
+      return `നാവിഗേഷൻ വിശകലനം ചെയ്യുക:
+HAZARDS: അപകടങ്ങളുടെ പട്ടിക, അല്ലെങ്കിൽ "NONE".
+NAVIGATION: സുരക്ഷിതമായ വഴി, ഒഴിവാക്കേണ്ട തടസ്സങ്ങൾ, നിർദ്ദേശിക്കുന്ന ദിശ (50 വാക്കിൽ താഴെ), മലയാളത്തിൽ മാത്രം.
+ഉത്തരം മലയാളത്തിൽ മാത്രം നൽകുക.`
     }
     if (language === 'hi') {
       return `नेविगेशन विश्लेषण करें:
@@ -158,7 +197,7 @@ Respond in English only. Format exactly as shown above.`;
   if (language === 'ml') {
     return `ദൃശ്യവിശകലനം നടത്തുക:
 HAZARDS: അപകടങ്ങൾ, അല്ലെങ്കിൽ "NONE".
-DESCRIPTION: ദൃശ്യത്തിന്റെ ഒരു വാചകം വിവരണം (50 വാക്കിൽ താഴെ), മലയാളത്തിൽ മാത്രം.
+DESCRIPTION: ദൃശ്യത്തിന്റെ ഒരു വ്യക്തമായ വിവരണം (50 വാക്കിൽ താഴെ), മലയാളത്തിൽ മാത്രം.
 OBJECTS: അവിടെ കാണുന്ന വസ്തുക്കൾ (ഇംഗ്ലീഷിൽ).
 ഉത്തരം മലയാളത്തിൽ മാത്രം നൽകുക.`
   }
@@ -252,20 +291,24 @@ const translateHazardsToLanguage = (hazards: string[], language: string): string
   });
 };
 
+/** Compresses a webcam frame and returns the base64 payload for the API. */
+export async function prepareImageForApi(base64Image: string): Promise<string> {
+  if (!base64Image || !base64Image.includes('base64')) {
+    throw new Error('Invalid image data provided');
+  }
+  const imageData = base64Image.split(',')[1];
+  if (!imageData) {
+    throw new Error('Invalid base64 image format');
+  }
+  // Compress before sending to reduce payload size and analysis time.
+  const compressed = await compressImage(`data:image/jpeg;base64,${imageData}`);
+  return compressed.split(',')[1] || imageData;
+}
+
 export async function analyzeImage(base64Image: string, language: string = 'en') {
   try {
-    if (!base64Image || !base64Image.includes('base64')) {
-      throw new Error('Invalid image data provided');
-    }
-
-    const imageData = base64Image.split(',')[1];
-    if (!imageData) {
-      throw new Error('Invalid base64 image format');
-    }
-
     // Compress before sending to reduce payload size and analysis time.
-    const compressed = await compressImage(`data:image/jpeg;base64,${imageData}`);
-    const compressedData = compressed.split(',')[1] || imageData;
+    const compressedData = await prepareImageForApi(base64Image);
 
     // Single API call returns hazards, description, and objects together
     const result = await generateContentWithRotation([
@@ -287,18 +330,8 @@ export async function analyzeImage(base64Image: string, language: string = 'en')
 
 export async function analyzeForNavigation(base64Image: string, language: string = 'en') {
   try {
-    if (!base64Image || !base64Image.includes('base64')) {
-      throw new Error('Invalid image data provided');
-    }
-
-    const imageData = base64Image.split(',')[1];
-    if (!imageData) {
-      throw new Error('Invalid base64 image format');
-    }
-
     // Compress before sending to reduce payload size and analysis time.
-    const compressed = await compressImage(`data:image/jpeg;base64,${imageData}`);
-    const compressedData = compressed.split(',')[1] || imageData;
+    const compressedData = await prepareImageForApi(base64Image);
 
     // Single API call returns hazards and navigation together
     const result = await generateContentWithRotation([
@@ -315,4 +348,72 @@ export async function analyzeForNavigation(base64Image: string, language: string
     console.error('Error analyzing image for navigation:', error);
     throw error;
   }
+}
+
+/** One question and one answer from an earlier turn. */
+export type ConversationTurn = {
+  question: string;
+  answer: string;
+};
+
+const LANGUAGE_NAMES: Record<string, string> = {
+  en: 'English',
+  ml: 'Malayalam',
+  hi: 'Hindi',
+};
+
+function buildQuestionPrompt(
+  question: string,
+  language: string,
+  history: ConversationTurn[],
+  hasImage: boolean
+): string {
+  const languageName = LANGUAGE_NAMES[language] ?? 'English';
+  const earlier = history.length
+    ? history.map((turn) => `Q: ${turn.question}\nA: ${turn.answer}`).join('\n')
+    : '(none)';
+
+  const imageNote = hasImage
+    ? 'The image shows what the person sees right now.'
+    : 'No image is available. Answer from the earlier exchange only.';
+
+  return `You are a visual assistant for a blind person. ${imageNote}
+Answer in at most 25 words. Use plain spoken language. Do not use lists, markdown or emoji.
+If the image does not show the answer, say "I cannot tell from the image." Never guess.
+
+Earlier exchange:
+${earlier}
+
+Answer in ${languageName} only.
+
+Question: ${question}`;
+}
+
+/**
+ * Answers a spoken question about what the user sees.
+ *
+ * The image is optional. A question without an image still gets an answer from
+ * the earlier exchange.
+ */
+export async function askAboutScene(
+  question: string,
+  base64Image: string | null,
+  language: string = 'en',
+  history: ConversationTurn[] = []
+): Promise<string> {
+  const parts: GenerateContentInput = [
+    buildQuestionPrompt(question, language, history, !!base64Image),
+  ];
+
+  if (base64Image) {
+    const imageData = await prepareImageForApi(base64Image);
+    parts.push({ inlineData: { data: imageData, mimeType: 'image/jpeg' } });
+  }
+
+  const result = await generateContentWithRotation(parts);
+  const answer = result.response.text().trim();
+  if (!answer) {
+    throw new Error('The model returned an empty answer');
+  }
+  return answer;
 }
