@@ -10,6 +10,8 @@ export type VoiceCommandId =
   | "scene"
   | "navigation"
   | "hazards"
+  | "describe"
+  | "repeat"
   | "language";
 
 type CommandSpec = {
@@ -76,13 +78,38 @@ export const VOICE_COMMANDS: CommandSpec[] = [
       "scene description",
       "enable scene",
       "start scene",
-      "describe scene",
-      "describe what you see",
-      "what do you see",
       "दृश्य विवरण",
       "दृश्य मोड",
       "ദൃശ്യ വിവരണം",
       "സീൻ മോഡ്",
+    ],
+  },
+  {
+    id: "describe",
+    phrases: [
+      "describe",
+      "describe the scene",
+      "describe what you see",
+      "tell me what you see",
+      "read the scene",
+      "दृश्य बताएं",
+      "क्या दिख रहा है",
+      "ദൃശ്യം വിവരിക്കുക",
+      "എന്ത് കാണുന്നു",
+    ],
+  },
+  {
+    id: "repeat",
+    phrases: [
+      "repeat",
+      "repeat that",
+      "say that again",
+      "tell me again",
+      "what did you say",
+      "दोहराएं",
+      "फिर से बताएं",
+      "വീണ്ടും പറയുക",
+      "വീണ്ടും പറയൂ",
     ],
   },
   {

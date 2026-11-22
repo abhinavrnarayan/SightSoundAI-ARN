@@ -376,6 +376,51 @@ function App() {
         });
         return;
       }
+      case "describe": {
+        if (!isStarted) return;
+        // The current result is read again. No API call is needed.
+        if (!analysis) {
+          speak(t.analyzing, true);
+          return;
+        }
+        speak(
+          mode === "navigation"
+            ? buildNavigationSpeech({
+                hazards: analysis.hazards,
+                navigation: analysis.navigation,
+              })
+            : buildSceneSpeech(analysis),
+          true,
+        );
+        trackVoiceCommand("describe", language, true, { mode });
+        return;
+      }
+      case "repeat": {
+        if (!isStarted) return;
+        // The last answer is read again. No API call is needed.
+        if (conversation?.answer) {
+          speak(conversation.answer, true);
+          trackVoiceCommand("repeat", language, true, {
+            source: "answer",
+          });
+          return;
+        }
+        if (!analysis) {
+          speak(t.analyzing, true);
+          return;
+        }
+        speak(
+          mode === "navigation"
+            ? buildNavigationSpeech({
+                hazards: analysis.hazards,
+                navigation: analysis.navigation,
+              })
+            : buildSceneSpeech(analysis),
+          true,
+        );
+        trackVoiceCommand("repeat", language, true, { source: "scene" });
+        return;
+      }
       case "language":
         if (!isStarted) return;
         handleLanguageToggle();
