@@ -68,6 +68,9 @@ function App() {
   const isThinkingRef = useRef<boolean>(false); // one question at a time
 
   const conversationHistoryRef = useRef<ConversationTurn[]>([]);
+  // One question runs at a time. A question spoken during that time waits.
+  const queuedQuestionRef = useRef<string | null>(null);
+  const questionAfterSpeechRef = useRef<string | null>(null);
   const lastUtteranceRef = useRef<{ text: string; at: number }>({ text: "", at: 0 });
   const imageAnalysisCountRef = useRef<number>(0);
   const totalSpeakingTimeRef = useRef<number>(0);
@@ -93,6 +96,8 @@ function App() {
   const speakRef = useRef<(text: string, isCommand: boolean) => void>(() => {});
   // The start and resume paths trigger a capture through this ref.
   const captureRef = useRef<() => void>(() => {});
+  // The speech callback starts a waiting question through this ref.
+  const questionRef = useRef<(question: string) => void>(() => {});
 
   const t = translations[language];
 
@@ -151,6 +156,9 @@ function App() {
     isPausedRef.current = true;
     // Drop any analysis prepared before the stop so it is not spoken later.
     preloadedAnalysisRef.current = null;
+    // Drop a waiting question. No API call may run while the app is stopped.
+    queuedQuestionRef.current = null;
+    questionAfterSpeechRef.current = null;
 
     // Drop the old handlers first. A cancelled utterance still fires "onend",
     // and that stale callback must not resume the app.
@@ -249,7 +257,13 @@ function App() {
 
   // Answers a spoken question about what the user sees right now.
   const handleQuestion = async (question: string) => {
-    if (!isStarted || isPausedRef.current || isThinkingRef.current) return;
+    if (!isStarted || isPausedRef.current) return;
+    if (isThinkingRef.current) {
+      // One question runs at a time. Keep the newest question for later, so a
+      // follow-up question is never lost.
+      queuedQuestionRef.current = question;
+      return;
+    }
     isThinkingRef.current = true;
     setIsThinking(true);
     setConversation({ question, answer: "" });
@@ -296,8 +310,19 @@ function App() {
     } finally {
       isThinkingRef.current = false;
       setIsThinking(false);
+
+      // A question spoken during this one waits for the narration to end, so
+      // the first answer is not cut off.
+      const queued = queuedQuestionRef.current;
+      queuedQuestionRef.current = null;
+      if (queued && !isPausedRef.current) {
+        questionAfterSpeechRef.current = queued;
+      }
     }
   };
+
+  // The speech callback reaches the question handler through this ref.
+  questionRef.current = handleQuestion;
 
   // Runs one voice command.
   const runVoiceCommand = (command: VoiceCommandId) => {
@@ -781,6 +806,14 @@ function App() {
         const cmd = voiceCommandRef.current;
         voiceCommandRef.current = null;
         cmd.onCommand();
+        return;
+      }
+
+      // A question that waited for this narration runs now.
+      if (questionAfterSpeechRef.current) {
+        const question = questionAfterSpeechRef.current;
+        questionAfterSpeechRef.current = null;
+        void questionRef.current(question);
         return;
       }
 
