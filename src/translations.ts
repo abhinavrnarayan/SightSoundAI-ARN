@@ -17,6 +17,7 @@ export const translations = {
     voiceSettingsUpdated: 'Voice settings updated',
     testMessage: 'This is a test message with the current voice settings',
     welcomeMessage: 'Welcome to SightSound AI. I am your assistant for the visually impaired. Tap Start or say Start to begin describing the world around you.',
+    startedMessage: 'Started. I am now describing the world around you. Say Stop to pause me.',
     stopMessage: 'Stopped. I will not analyze until you say Start or Restart.',
     restartMessage: 'Resumed. I will start describing the scene again.',
   },
@@ -36,6 +37,7 @@ export const translations = {
     voiceSettingsUpdated: 'വോയ്‌സ് ക്രമീകരണങ്ങൾ അപ്‌ഡേറ്റ് ചെയ്‌തു',
     testMessage: 'ഇത് നിലവിലെ വോയ്‌സ് ക്രമീകരണങ്ങളുള്ള ഒരു പരീക്ഷണ സന്ദേശമാണ്',
     welcomeMessage: 'സൈറ്റ്‌സൗണ്ട് എ ഐ. ദൃശ്യവൈകല്യമുള്ളവർക്കുള്ള നിങ്ങളുടെ സഹായി ഞാനാണ്. ആരംഭിക്കാൻ Start അമർത്തുക.',
+    startedMessage: 'തുടങ്ങി. ഞാൻ ഇപ്പോൾ നിങ്ങളുടെ ചുറ്റും ഉള്ള ലോകം വിവരിക്കുന്നു. നിർത്താൻ Stop പറയുക.',
     stopMessage: 'നിർത്തി. Start അല്ലെങ്കിൽ Restart പറഞ്ഞ് വരെ വിശകലനം നിർത്തുന്നു.',
     restartMessage: 'പുനരാരംഭിച്ചു. വീണ്ടും വിശകലനം തുടങ്ങുന്നു.',
   },
@@ -55,6 +57,7 @@ export const translations = {
     voiceSettingsUpdated: 'वॉइस सेटिंग्स अपडेट की गईं',
     testMessage: 'यह वर्तमान वॉइस सेटिंग्स के साथ एक परीक्षण संदेश है',
     welcomeMessage: 'साइटसाउंड एआई में आपका स्वागत है। मैं दृष्टिबाधित व्यक्तियों के लिए आपका सहायक हूँ। शुरू करने के लिए Start बटन दबाएँ या Start कहें।',
+    startedMessage: 'शुरू हो गया। मैं अब आपके आसपास की दुनिया का वर्णन कर रहा हूँ। रुकने के लिए Stop कहें।',
     stopMessage: 'रोक दिया गया। आप Start या Restart कहने तक मैं विश्लेषण नहीं करूंगा।',
     restartMessage: 'पुनः आरंभ किया गया। मैं फिर से दृश्य का वर्णन शुरू करूंगा।',
   }

@@ -8,11 +8,9 @@ import {
   trackError,
   getSessionInfo,
   trackVoiceCommand,
-  trackSettingsChanged,
   trackMicrophonePermission,
   trackSpeechSupport,
   trackCameraError,
-  trackKeyRotation,
   trackTabVisibility,
 } from "./firebase";
 import {
@@ -50,14 +48,14 @@ function App() {
   const webcamRef = useRef<Webcam>(null);
   const speechRef = useRef<SpeechSynthesisUtterance | null>(null);
   const analysisIntervalRef = useRef<number | null>(null);
-  const pauseTimeoutRef = useRef<number | null>(null);
+  const isPausedRef = useRef<boolean>(false); // mirrors isPaused for callbacks that run later
   const imageAnalysisCountRef = useRef<number>(0);
   const totalSpeakingTimeRef = useRef<number>(0);
   const speakingStartTimeRef = useRef<number | null>(null);
   const lastInteractionTimeRef = useRef<number>(Date.now());
   const lastCaptureTimeRef = useRef<number>(0);
   const CAPTURE_COOLDOWN_MS = 3000; // Minimum gap between auto-captures (reduced for lower latency)
-  const firstCaptureRef = useRef<boolean>(false);
+  const startButtonRef = useRef<HTMLButtonElement>(null);
   const preloadedAnalysisRef = useRef<{
     objects: string[];
     description: string;
@@ -75,6 +73,8 @@ function App() {
   const handleModeSwitch = (newMode: "scene" | "navigation") => {
     const previousMode = mode;
     setMode(newMode);
+    // A preloaded result belongs to the old mode. Drop it so it is not spoken.
+    preloadedAnalysisRef.current = null;
     speak(t.switchedToMode(newMode), true);
 
     // Track mode switch in GA
@@ -105,6 +105,52 @@ function App() {
 
     // Update user property
     updateUserProperties({ preferred_language: newLang });
+  };
+
+  // Starts the app. The Start button and the voice command use the same path
+  // so a blind user gets the same spoken feedback either way.
+  const startApp = () => {
+    setIsStarted(true);
+    setIsPaused(false);
+    isPausedRef.current = false;
+    trackVoiceCommand("start", language, true);
+    speak(t.startedMessage, true);
+  };
+
+  // Stops narration and analysis until the user says Start or Restart.
+  const pauseApp = () => {
+    setIsPaused(true);
+    isPausedRef.current = true;
+    // Drop any analysis prepared before the stop so it is not spoken later.
+    preloadedAnalysisRef.current = null;
+
+    window.speechSynthesis.cancel();
+    setIsSpeaking(false);
+
+    // Calculate interrupted speaking time
+    let interruptedDuration = 0;
+    if (speakingStartTimeRef.current) {
+      interruptedDuration = Math.round(performance.now() - speakingStartTimeRef.current);
+      speakingStartTimeRef.current = null;
+    }
+
+    trackEngagement("speech_stopped", {
+      method: "user_action",
+      language: language,
+      interrupted_duration_ms: interruptedDuration,
+      total_speaking_time_ms: totalSpeakingTimeRef.current,
+    });
+
+    trackVoiceCommand("stop", language, true);
+    speak(t.stopMessage, true);
+  };
+
+  // Resumes analysis and narration.
+  const resumeApp = () => {
+    setIsPaused(false);
+    isPausedRef.current = false;
+    trackVoiceCommand("restart", language, true);
+    speak(t.restartMessage, true);
   };
 
   useEffect(() => {
@@ -186,11 +232,16 @@ function App() {
         ],
         callback: () => {
           if (!isStarted) return;
-          voiceCommandRef.current = { onCommand: () => handleModeSwitch("navigation") };
-          speak(t.switchedToMode("navigation"), true);
+          // While narrating, wait for the narration to end so it is not cut off.
+          if (isSpeaking) {
+            voiceCommandRef.current = { onCommand: () => handleModeSwitch("navigation") };
+            return;
+          }
+          handleModeSwitch("navigation");
         },
         isFuzzyMatch: true,
-        fuzzyMatchingThreshold: 0.6,
+        fuzzyMatchingThreshold: 0.7,
+        bestMatchOnly: true,
       },
       {
         command: [
@@ -208,11 +259,16 @@ function App() {
         ],
         callback: () => {
           if (!isStarted) return;
-          voiceCommandRef.current = { onCommand: () => handleModeSwitch("scene") };
-          speak(t.switchedToMode("scene"), true);
+          // While narrating, wait for the narration to end so it is not cut off.
+          if (isSpeaking) {
+            voiceCommandRef.current = { onCommand: () => handleModeSwitch("scene") };
+            return;
+          }
+          handleModeSwitch("scene");
         },
         isFuzzyMatch: true,
-        fuzzyMatchingThreshold: 0.6,
+        fuzzyMatchingThreshold: 0.7,
+        bestMatchOnly: true,
       },
       {
         command: [
@@ -224,12 +280,9 @@ function App() {
           "തുടங்கുക",
         ],
         callback: () => {
-          setIsStarted(true);
-          setIsPaused(false);
-          speak(t.welcomeMessage, true);
+          startApp();
         },
-        isFuzzyMatch: true,
-        fuzzyMatchingThreshold: 0.6,
+        // Exact match only. A fuzzy match also catches "restart" and "begin navigation".
       },
       {
         command: [
@@ -240,12 +293,9 @@ function App() {
           "നിർത്തുക",
         ],
         callback: () => {
-          setIsPaused(true);
-          window.speechSynthesis.cancel();
-          speak(t.stopMessage, true);
+          pauseApp();
         },
-        isFuzzyMatch: true,
-        fuzzyMatchingThreshold: 0.6,
+        // Exact match only. A fuzzy match also catches "restart" and "begin navigation".
       },
       {
         command: [
@@ -256,11 +306,14 @@ function App() {
           "മulai ചെയ്യുക",
         ],
         callback: () => {
-          setIsPaused(false);
-          speak(t.restartMessage, true);
+          // Restart also resumes from the welcome screen.
+          if (!isStarted) {
+            startApp();
+            return;
+          }
+          resumeApp();
         },
-        isFuzzyMatch: true,
-        fuzzyMatchingThreshold: 0.6,
+        // Exact match only. A fuzzy match also catches "start".
       },
       {
         command: [
@@ -283,6 +336,10 @@ function App() {
             speak(response, true);
 
             // Track voice command for hazards
+            trackVoiceCommand("hazards", language, true, {
+              hazards_found: analysis.hazards.length > 0,
+              hazard_count: analysis.hazards.length,
+            });
             trackEngagement("voice_command", {
               command: "hazards_query",
               language: language,
@@ -307,6 +364,7 @@ function App() {
         },
         isFuzzyMatch: true,
         fuzzyMatchingThreshold: 0.6,
+        bestMatchOnly: true,
       },
     ],
   });
@@ -371,19 +429,19 @@ function App() {
     return parts.join(' ');
   }
 
-  const handleCapture = useCallback(async (shouldPreload = false) => {    if (!webcamRef.current || isPaused) return;
+  const handleCapture = useCallback(async () => {
+    if (isPaused) return;
 
+    // The camera needs a moment to start. A missing frame is not an error,
+    // so the next tick tries again instead of losing the capture slot.
+    const imageSrc = webcamRef.current ? webcamRef.current.getScreenshot() : null;
+    if (!imageSrc) return;
+
+    lastCaptureTimeRef.current = Date.now();
     setIsCapturing(true);
     const analysisStartTime = performance.now();
-    const imageSrc = webcamRef.current.getScreenshot();
 
     try {
-      if (!imageSrc) {
-        console.warn("No image captured from webcam");
-        trackError("No image captured from webcam", { mode, language });
-        return;
-      }
-
       imageAnalysisCountRef.current += 1;
       lastInteractionTimeRef.current = Date.now();
 
@@ -396,6 +454,7 @@ function App() {
 
       if (mode === "navigation") {
         const result = await analyzeForNavigation(imageSrc, language);
+        if (isPausedRef.current) return; // stopped while the request was in flight
         const analysisDuration = Math.round(performance.now() - analysisStartTime);
         const analysisResult = {
           objects: [],
@@ -420,10 +479,12 @@ function App() {
         // Track performance
         trackPerformance("navigation_analysis", analysisDuration);
 
-        if (shouldPreload || isSpeaking) {
-          // Preload while narrating - store for next turn
+        if (isSpeaking) {
+          // Still narrating. Store the result for the next turn.
           preloadedAnalysisRef.current = analysisResult;
         } else {
+          // A fresh result replaces any stale preload so it is not spoken twice.
+          preloadedAnalysisRef.current = null;
           setAnalysis({
             objects: [],
             description: result.navigation || "",
@@ -431,12 +492,13 @@ function App() {
             navigation: result.navigation,
           });
 
-          if (!isPaused && !isSpeaking) {
+          if (!isPaused) {
             speak(buildNavigationSpeech(result), false);
           }
         }
       } else {
         const result = await analyzeImage(imageSrc, language);
+        if (isPausedRef.current) return; // stopped while the request was in flight
         const analysisDuration = Math.round(performance.now() - analysisStartTime);
         const analysisResult = {
           objects: result.objects,
@@ -462,13 +524,15 @@ function App() {
         // Track performance
         trackPerformance("scene_analysis", analysisDuration);
 
-        if (shouldPreload || isSpeaking) {
-          // Preload while narrating - store for next turn
+        if (isSpeaking) {
+          // Still narrating. Store the result for the next turn.
           preloadedAnalysisRef.current = analysisResult;
         } else {
+          // A fresh result replaces any stale preload so it is not spoken twice.
+          preloadedAnalysisRef.current = null;
           setAnalysis(result);
 
-          if (!isPaused && !isSpeaking) {
+          if (!isPaused) {
             speak(buildSceneSpeech(result), false);
           }
         }
@@ -491,51 +555,29 @@ function App() {
     }
   }, [isPaused, isSpeaking, mode, language, t]);
 
+  // Auto-capture loop. It only runs after the user starts the app, so the
+  // welcome screen never spends API calls.
   useEffect(() => {
-    const interval = 10;
-    let timeLeft = interval;
-
-    // Capture immediately on mount to remove the initial ~10s delay.
-    if (!firstCaptureRef.current && !isPaused && !isSpeaking) {
-      firstCaptureRef.current = true;
-      lastCaptureTimeRef.current = Date.now();
-      handleCapture();
-    }
+    if (!isStarted) return;
 
     analysisIntervalRef.current = window.setInterval(() => {
       // Pause auto-capture when the tab is hidden (user switched away / minimized).
-      if (document.visibilityState === 'hidden') {
-        timeLeft = interval;
-        return;
-      }
-      if (isPaused || isCapturing) {
-        timeLeft = interval;
-        return;
-      }
+      if (document.visibilityState === "hidden") return;
+      // While narrating, the preload started in speak.onstart prepares the next result.
+      if (isPaused || isCapturing || isSpeaking) return;
       // Enforce a minimum cooldown between captures to avoid hammering the API.
-      if (Date.now() - lastCaptureTimeRef.current < CAPTURE_COOLDOWN_MS) {
-        return;
-      }
+      if (Date.now() - lastCaptureTimeRef.current < CAPTURE_COOLDOWN_MS) return;
 
-      if (timeLeft <= 0) {
-        lastCaptureTimeRef.current = Date.now();
-        // Normal capture (not preloading - preloading is handled in speak onstart).
-        handleCapture(false);
-        timeLeft = interval;
-      } else {
-        timeLeft--;
-      }
+      handleCapture();
     }, 1000);
 
     return () => {
       if (analysisIntervalRef.current) {
         clearInterval(analysisIntervalRef.current);
-      }
-      if (pauseTimeoutRef.current) {
-        clearTimeout(pauseTimeoutRef.current);
+        analysisIntervalRef.current = null;
       }
     };
-  }, [handleCapture, isPaused, isSpeaking, isCapturing]);
+  }, [handleCapture, isPaused, isSpeaking, isCapturing, isStarted]);
 
   // Track tab visibility changes (user switches away / back)
   useEffect(() => {
@@ -549,27 +591,51 @@ function App() {
     };
   }, []);
 
-  // Auto-speak welcome message on welcome screen so blind users know what to do.
+  // Chrome blocks speech until the page gets a key press or tap (error "not-allowed"),
+  // so the welcome message waits for the first one. Touch only counts at pointerup/touchend.
   useEffect(() => {
-    if (!isStarted && !welcomeSpokenRef.current) {
-      welcomeSpokenRef.current = true;
-      speak(t.welcomeMessage, true);
-    }
+    if (isStarted) return;
+    const events = ["keydown", "pointerdown", "pointerup", "touchend", "click"];
+    const speakOnFirstPress = (event: Event) => {
+      if (navigator.userActivation && !navigator.userActivation.hasBeenActive) return;
+      // The Start button speaks its own confirmation, so do not talk over it.
+      if (
+        startButtonRef.current &&
+        event.target instanceof Node &&
+        startButtonRef.current.contains(event.target)
+      ) {
+        return;
+      }
+      events.forEach((name) => window.removeEventListener(name, speakOnFirstPress, true));
+      if (!welcomeSpokenRef.current) {
+        welcomeSpokenRef.current = true;
+        speak(t.welcomeMessage, true);
+      }
+    };
+    events.forEach((name) => window.addEventListener(name, speakOnFirstPress, true));
+    return () => events.forEach((name) => window.removeEventListener(name, speakOnFirstPress, true));
   }, [isStarted, t.welcomeMessage]);
 
+  // Keeps isPausedRef in step with state for callbacks that run later.
+  useEffect(() => {
+    isPausedRef.current = isPaused;
+  }, [isPaused]);
+
+  // No cleanup. Stopping here and starting again in the next effect run (hot reload,
+  // StrictMode) leaves react-speech-recognition unable to restart, so voice dies.
   useEffect(() => {
     if (browserSupportsSpeechRecognition) {
       SpeechRecognition.startListening({ continuous: true });
     }
-
-    return () => {
-      SpeechRecognition.stopListening();
-    };
   }, [browserSupportsSpeechRecognition]);
 
   const speak = (text: string, isCommand: boolean) => {
     if (speechRef.current) {
       window.speechSynthesis.cancel();
+      // Drop the old handlers. A cancelled utterance still fires "onend",
+      // and that stale callback must not touch the new narration.
+      speechRef.current.onend = null;
+      speechRef.current.onstart = null;
     }
 
     const voices = window.speechSynthesis.getVoices();
@@ -596,8 +662,9 @@ function App() {
 
       // Start preloading the next analysis immediately when TTS starts,
       // so it's ready by the time narration finishes (zero-latency transition).
-      if (!isPaused && webcamRef.current) {
-        handleCapture(true);
+      // Command speech (stop, start, mode) must not start an analysis.
+      if (!isCommand && !isPaused && webcamRef.current) {
+        handleCapture();
       }
 
       // Track speech start
@@ -628,6 +695,14 @@ function App() {
         speakingStartTimeRef.current = null;
       }
 
+      // A command spoken during narration runs now, before the next scene.
+      if (voiceCommandRef.current) {
+        const cmd = voiceCommandRef.current;
+        voiceCommandRef.current = null;
+        cmd.onCommand();
+        return;
+      }
+
       // If we preloaded the next analysis while speaking, use it now for zero-latency transition.
       if (!isCommand && preloadedAnalysisRef.current && !isPaused) {
         const preloaded = preloadedAnalysisRef.current;
@@ -650,57 +725,10 @@ function App() {
           });
           speak(buildSceneSpeech(preloaded), false);
         }
-        return;
-      }
-
-      if (isCommand) {
-        if (pauseTimeoutRef.current) {
-          clearTimeout(pauseTimeoutRef.current);
-        }
-
-        pauseTimeoutRef.current = window.setTimeout(() => {
-          setIsPaused(false);
-          pauseTimeoutRef.current = null;
-        }, 2000);
-      }
-
-      // Execute any deferred voice command that was recognized while speaking.
-      if (voiceCommandRef.current) {
-        const cmd = voiceCommandRef.current;
-        voiceCommandRef.current = null;
-        cmd.onCommand();
       }
     };
 
     window.speechSynthesis.speak(speechRef.current);
-  };
-
-  const stopSpeaking = () => {
-    window.speechSynthesis.cancel();
-    setIsSpeaking(false);
-
-    // Calculate interrupted speaking time
-    let interruptedDuration = 0;
-    if (speakingStartTimeRef.current) {
-      interruptedDuration = Math.round(performance.now() - speakingStartTimeRef.current);
-      speakingStartTimeRef.current = null;
-    }
-
-    // Track speech stopped with metrics
-    trackEngagement("speech_stopped", {
-      method: "user_action",
-      language: language,
-      interrupted_duration_ms: interruptedDuration,
-      total_speaking_time_ms: totalSpeakingTimeRef.current,
-    });
-
-    if (pauseTimeoutRef.current) {
-      clearTimeout(pauseTimeoutRef.current);
-    }
-
-    setTimeout(() => {
-      setIsPaused(false);
-    }, 500);
   };
 
   if (!browserSupportsSpeechRecognition) {
@@ -744,14 +772,15 @@ function App() {
             {t.welcomeMessage}
           </p>
           <button
-            onClick={() => {
-              setIsStarted(true);
-              speak(t.welcomeMessage, true);
-            }}
+            ref={startButtonRef}
+            onClick={startApp}
             className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-4 px-8 rounded-full text-lg font-semibold transition-colors"
           >
             Start SightSound AI
           </button>
+          <p className="mt-6 text-sm text-gray-400">
+            Press any key or tap the screen to hear the instructions.
+          </p>
           <p className="mt-6 text-sm text-gray-400">
             Or say "Start" to begin
           </p>
@@ -778,17 +807,18 @@ function App() {
             </button>
             <div className="flex items-center gap-2">
               <button
-                onClick={isSpeaking ? stopSpeaking : undefined}
+                onClick={isPaused ? resumeApp : pauseApp}
+                aria-label={isPaused ? "Resume" : "Stop"}
                 className={`p-1.5 rounded-full transition-colors ${
-                  isSpeaking
-                    ? "bg-red-500/70 hover:bg-red-600/70"
-                    : "bg-indigo-600/70 hover:bg-indigo-700/70"
+                  isPaused
+                    ? "bg-green-500/70 hover:bg-green-600/70"
+                    : "bg-red-500/70 hover:bg-red-600/70"
                 }`}
               >
-                {isSpeaking ? (
-                  <StopCircle className="w-5 h-5" />
-                ) : (
+                {isPaused ? (
                   <Volume2 className="w-5 h-5" />
+                ) : (
+                  <StopCircle className="w-5 h-5" />
                 )}
               </button>
               <div

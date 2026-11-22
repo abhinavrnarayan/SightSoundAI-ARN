@@ -67,10 +67,10 @@ function getCurrentGeminiKey(): string {
   return GEMINI_API_KEYS[geminiKeyIndex % GEMINI_API_KEYS.length]!;
 }
 
-function rotateGeminiKey() {
+function rotateGeminiKey(reason: string) {
   if (GEMINI_API_KEYS.length <= 1) return;
   geminiKeyIndex = (geminiKeyIndex + 1) % GEMINI_API_KEYS.length;
-  trackKeyRotation('quota_or_rate_limit');
+  trackKeyRotation(reason);
 }
 
 function shouldRotateKey(error: unknown): boolean {
@@ -78,15 +78,22 @@ function shouldRotateKey(error: unknown): boolean {
     typeof error === 'object' && error && 'message' in error
       ? String((error as { message?: unknown }).message)
       : String(error);
+  const lower = msg.toLowerCase();
   return (
     msg.includes('429') ||
-    msg.toLowerCase().includes('resource_exhausted') ||
-    msg.toLowerCase().includes('quota') ||
-    msg.toLowerCase().includes('rate') ||
-    msg.toLowerCase().includes('limit') ||
-    msg.toLowerCase().includes('api key not valid') ||
-    msg.toLowerCase().includes('permission') ||
-    msg.toLowerCase().includes('unauth')
+    lower.includes('resource_exhausted') ||
+    lower.includes('quota') ||
+    lower.includes('rate') ||
+    lower.includes('limit') ||
+    lower.includes('api key not valid') ||
+    lower.includes('permission') ||
+    lower.includes('unauth') ||
+    // The free tier returns 503 when the model is under heavy load.
+    // Another key usually serves the request straight away.
+    msg.includes('503') ||
+    lower.includes('unavailable') ||
+    lower.includes('overloaded') ||
+    lower.includes('high demand')
   );
 }
 
@@ -102,7 +109,10 @@ async function withGeminiKeyRotation<T>(fn: (genAI: GoogleGenerativeAI) => Promi
     } catch (err) {
       lastError = err;
       if (GEMINI_API_KEYS.length > 1 && shouldRotateKey(err)) {
-        rotateGeminiKey();
+        const reason = String((err as { message?: unknown })?.message ?? '').includes('503')
+          ? 'model_unavailable'
+          : 'quota_or_rate_limit';
+        rotateGeminiKey(reason);
         continue;
       }
       throw err;
