@@ -179,18 +179,18 @@ function buildAnalysisPrompt(mode: 'scene' | 'navigation', language: string): st
     if (language === 'ml') {
       return `നാവിഗേഷൻ വിശകലനം ചെയ്യുക:
 HAZARDS: അപകടങ്ങളുടെ പട്ടിക, അല്ലെങ്കിൽ "NONE".
-NAVIGATION: നേരിൽ ഉള്ളവ, ഒഴിവാക്കേണ്ട തടസ്സങ്ങൾ, അടുത്ത നടപ്പ് (50 വാക്കിൽ താഴെ), മലയാളത്തിൽ മാത്രം.
+NAVIGATION: നേരിൽ ഉള്ളവ, ഒഴിവാക്കേണ്ട തടസ്സങ്ങൾ, അടുത്ത നടപ്പ് (30 വാക്കിൽ താഴെ), മലയാളത്തിൽ മാത്രം.
 ഉത്തരം മലയാളത്തിൽ മാത്രം നൽകുക.`
     }
     if (language === 'hi') {
       return `नेविगेशन विश्लेषण करें:
 HAZARDS: खतरों की कॉमा-सेपरेटेड सूची, या "NONE".
-NAVIGATION: सामने क्या है, किन बाधाओं से बचें, और अगला कदम (50 शब्दों से कम), हिंदी में केवल देवनागरी लिपि में.
+NAVIGATION: सामने क्या है, किन बाधाओं से बचें, और अगला कदम (30 शब्दों से कम), हिंदी में केवल देवनागरी लिपि में.
 उत्तर केवल हिंदी में दें।`
     }
     return `Analyze this scene for navigation guidance for a visually impaired person.
 HAZARDS: comma-separated list of immediate hazards (steps, uneven surfaces, obstacles, vehicles, moving objects), or "NONE" if none.
-NAVIGATION: what is directly ahead within two steps, what to avoid, and the next step to take, for example "a chair is one step ahead on the left, step right to pass it" (under 50 words).
+NAVIGATION: what is directly ahead within two steps, what to avoid, and the next step to take, for example "a chair is one step ahead on the left, step right to pass it" (under 30 words).
 Respond in English only. Format exactly as shown above.`;
   }
 
@@ -305,8 +305,7 @@ function buildQuestionPrompt(
     : 'No image is available. Answer from the earlier exchange only.';
 
   return `You are a visual assistant for a blind person. ${imageNote}
-Answer in at most 25 words. Use plain spoken language. Do not use lists, markdown or emoji.
-If the image does not show the answer, say "I cannot tell from the image." Never guess.
+Answer in one short spoken sentence. Never guess. If the image does not show the answer, say "I cannot tell from the image."
 
 Earlier exchange:
 ${earlier}

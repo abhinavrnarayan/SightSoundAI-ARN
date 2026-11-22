@@ -89,6 +89,8 @@ function App() {
   const voiceCommandRef = useRef<{
     onCommand: () => void;
   } | null>(null);
+  // The hazards from the previous analysis. A change means a new hazard.
+  const previousHazardKeyRef = useRef<string>("");
   const welcomeSpokenRef = useRef<boolean>(false);
 
   // The capture callback and the speech callback call each other. The speech
@@ -534,9 +536,40 @@ function App() {
         // Track performance
         trackPerformance("navigation_analysis", analysisDuration);
 
+        // A hazard that changes must not wait for the current narration.
+        const hazardKey = result.hazards
+          .map((h) => h.toLowerCase())
+          .sort()
+          .join(", ");
+        const hazardChanged = hazardKey !== previousHazardKeyRef.current;
+        previousHazardKeyRef.current = hazardKey;
+
         if (isSpeakingRef.current) {
-          // Still narrating. Store the result for the next turn.
-          preloadedAnalysisRef.current = analysisResult;
+          if (hazardChanged && hazardKey) {
+            // A new hazard interrupts the current narration. The user must
+            // hear it now, not after the current speech ends.
+            preloadedAnalysisRef.current = null;
+            setAnalysis({
+              objects: [],
+              description: result.navigation || "",
+              hazards: result.hazards,
+              navigation: result.navigation,
+            });
+
+            const parts = [
+              `⚠️ Watch out. Hazards ahead: ${result.hazards.join(", ")}.`,
+            ];
+            if (result.navigation) parts.push(result.navigation);
+            speakRef.current(parts.join(" "), false);
+
+            trackEvent("hazard_interrupt", {
+              hazard_types: result.hazards.join(","),
+              language: currentLanguage,
+            });
+          } else {
+            // Still narrating. Store the result for the next turn.
+            preloadedAnalysisRef.current = analysisResult;
+          }
         } else {
           // A fresh result replaces any stale preload so it is not spoken twice.
           preloadedAnalysisRef.current = null;
