@@ -102,6 +102,10 @@ function App() {
   const questionRef = useRef<(question: string) => void>(() => {});
 
   const t = translations[language];
+  // The speech builders run after the render. They read the current language
+  // here, so a language change always reaches the next narration.
+  const tRef = useRef(t);
+  tRef.current = t;
 
   const handleModeSwitch = (newMode: "scene" | "navigation") => {
     const previousMode = mode;
@@ -279,16 +283,18 @@ function App() {
     }
 
     const startedAt = performance.now();
+    const currentLanguage = languageRef.current;
     try {
       // A fresh frame answers the question about what the user sees now.
       const imageSrc = webcamRef.current ? webcamRef.current.getScreenshot() : null;
       const answer = await askAboutScene(
         question,
         imageSrc,
-        language,
+        currentLanguage,
         conversationHistoryRef.current,
       );
       if (isPausedRef.current) return;
+      if (currentLanguage !== languageRef.current) return; // the language changed
 
       // Keep a few turns so a follow-up question understands the last answer.
       conversationHistoryRef.current = [
@@ -475,11 +481,12 @@ function App() {
   };
 
   // Build conversational, assistant-like speech for blind users - scene mode
-  function buildSceneSpeech(result: {
+  const buildSceneSpeech = useCallback((result: {
     objects: string[];
     description: string;
     hazards: string[];
-  }): string {
+  }): string => {
+    const t = tRef.current;
     const parts: string[] = [];
 
     // Start with a natural description of what's in front
@@ -489,26 +496,26 @@ function App() {
 
     // Mention key objects with their positions
     if (result.objects && result.objects.length > 0) {
-      const objectList = result.objects.slice(0, 5).join(', ');
-      parts.push(`I can see ${objectList}.`);
+      const objectList = result.objects.slice(0, 5);
+      parts.push(t.iCanSee(objectList));
     }
 
     // Hazards come first if any - critical for safety
     if (result.hazards && result.hazards.length > 0) {
-      const hazardList = result.hazards.join(', ');
-      parts.push(`⚠️ Be careful. I detected hazards: ${hazardList}.`);
+      parts.push(t.sceneHazards(result.hazards));
     } else {
-      parts.push('No immediate hazards detected.');
+      parts.push(t.sceneNoHazards);
     }
 
     return parts.join(' ');
-  }
+  }, []);
 
   // Build conversational, assistant-like speech for blind users - navigation mode
-  function buildNavigationSpeech(result: {
+  const buildNavigationSpeech = useCallback((result: {
     hazards: string[];
     navigation?: string;
-  }): string {
+  }): string => {
+    const t = tRef.current;
     const parts: string[] = [];
 
     // Navigation guidance first - most important for blind users walking around
@@ -518,14 +525,13 @@ function App() {
 
     // Hazards - critical safety info
     if (result.hazards && result.hazards.length > 0) {
-      const hazardList = result.hazards.join(', ');
-      parts.push(`⚠️ Watch out. Hazards ahead: ${hazardList}.`);
+      parts.push(t.navigationHazards(result.hazards));
     } else {
-      parts.push('The path ahead looks clear.');
+      parts.push(t.navigationNoHazards);
     }
 
     return parts.join(' ');
-  }
+  }, []);
 
   const handleCapture = useCallback(async () => {
     if (isPausedRef.current || isCapturingRef.current) return;
@@ -557,6 +563,7 @@ function App() {
       if (currentMode === "navigation") {
         const result = await analyzeForNavigation(imageSrc, currentLanguage);
         if (isPausedRef.current) return; // stopped while the request was in flight
+        if (currentLanguage !== languageRef.current) return; // the language changed
         const analysisDuration = Math.round(performance.now() - analysisStartTime);
         const analysisResult = {
           objects: [],
@@ -601,9 +608,7 @@ function App() {
               navigation: result.navigation,
             });
 
-            const parts = [
-              `⚠️ Watch out. Hazards ahead: ${result.hazards.join(", ")}.`,
-            ];
+            const parts = [tRef.current.navigationHazards(result.hazards)];
             if (result.navigation) parts.push(result.navigation);
             speakRef.current(parts.join(" "), false);
 
@@ -632,6 +637,7 @@ function App() {
       } else {
         const result = await analyzeImage(imageSrc, currentLanguage);
         if (isPausedRef.current) return; // stopped while the request was in flight
+        if (currentLanguage !== languageRef.current) return; // the language changed
         const analysisDuration = Math.round(performance.now() - analysisStartTime);
         const analysisResult = {
           objects: result.objects,
@@ -687,7 +693,7 @@ function App() {
       isCapturingRef.current = false;
       setIsCapturing(false);
     }
-  }, []);
+  }, [buildNavigationSpeech, buildSceneSpeech]);
 
   // The start and resume paths reach the capture callback through this ref.
   captureRef.current = handleCapture;
@@ -923,7 +929,7 @@ function App() {
     };
 
     window.speechSynthesis.speak(speechRef.current);
-  }, [handleCapture]);
+  }, [handleCapture, buildNavigationSpeech, buildSceneSpeech]);
 
   // The capture callback calls the speech function. Keep the ref in step so
   // the callback always reaches the current speech function.

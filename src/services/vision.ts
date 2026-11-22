@@ -1,6 +1,7 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { trackKeyRotation } from '../firebase';
 import { parseAnalysisResponse } from './analysisParser';
+import { readResponseText } from './responseText';
 
 // Downscale webcam screenshots before sending to Gemini.
 // Smaller payload = faster upload, fewer tokens, quicker responses.
@@ -199,14 +200,14 @@ Respond in English only. Format exactly as shown above.`;
     return `ദൃശ്യവിശകലനം നടത്തുക:
 HAZARDS: അപകടങ്ങൾ, അല്ലെങ്കിൽ "NONE".
 DESCRIPTION: ദൃശ്യത്തിന്റെ ഒരു വ്യക്തമായ വിവരണം, സ്ഥാനങ്ങളും ഉൾപ്പെടുത്തി (50 വാക്കിൽ താഴെ), മലയാളത്തിൽ മാത്രം.
-OBJECTS: അവിടെ കാണുന്ന വസ്തുക്കൾ അവയുടെ സ്ഥാനവും ഉൾപ്പെടുത്തി (ഇംഗ്ലീഷിൽ).
+OBJECTS: അവിടെ കാണുന്ന വസ്തുക്കൾ അവയുടെ സ്ഥാനവും ഉൾപ്പെടുത്തി (മലയാളത്തിൽ).
 ഉത്തരം മലയാളത്തിൽ മാത്രം നൽകുക.`
   }
   if (language === 'hi') {
     return `दृश्य विश्लेषण करें:
 HAZARDS: खतरे, या "NONE".
 DESCRIPTION: दृश्य का एक वाक्य विवरण, स्थानों के साथ (50 शब्दों से कम), केवल देवनागरी लिपि में हिंदी में.
-OBJECTS: दिखने वाली वस्तुएं और उनके स्थान (अंग्रेजी में).
+OBJECTS: दिखने वाली वस्तुएं और उनके स्थान (हिंदी में).
 उत्तर केवल हिंदी में दें।`
   }
   return `Analyze this scene for a visually impaired person.
@@ -243,7 +244,7 @@ export async function analyzeImage(base64Image: string, language: string = 'en')
       { inlineData: { data: compressedData, mimeType: 'image/jpeg' } }
     ]);
 
-    const parsed = parseAnalysisResponse(result.response.text(), 'scene', language);
+    const parsed = parseAnalysisResponse(readResponseText(result.response), 'scene', language);
     return {
       objects: parsed.objects,
       description: parsed.description,
@@ -266,7 +267,7 @@ export async function analyzeForNavigation(base64Image: string, language: string
       { inlineData: { data: compressedData, mimeType: 'image/jpeg' } }
     ]);
 
-    const parsed = parseAnalysisResponse(result.response.text(), 'navigation', language);
+    const parsed = parseAnalysisResponse(readResponseText(result.response), 'navigation', language);
     return {
       navigation: parsed.navigation,
       hazards: parsed.hazards,
@@ -337,7 +338,7 @@ export async function askAboutScene(
   }
 
   const result = await generateContentWithRotation(parts);
-  const answer = result.response.text().trim();
+  const answer = readResponseText(result.response);
   if (!answer) {
     throw new Error('The model returned an empty answer');
   }

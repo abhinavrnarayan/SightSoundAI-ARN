@@ -32,6 +32,38 @@ const hazardTranslations: { [key: string]: { ml: string; hi: string } } = {
   'hot surface': { ml: 'ചൂടുള്ള പ്രതലം', hi: 'गर्म सतह' }
 };
 
+/**
+ * Cleans one entry of a list for speech.
+ *
+ * The model often writes "- chair left". A dash at the start makes the speech
+ * harder to follow.
+ */
+const cleanListEntry = (entry: string): string => {
+  const cleaned = entry
+    .replace(/^[\s•*–—-]+/, '')
+    .replace(/[.;]+$/, '')
+    .trim();
+  return cleaned;
+};
+
+/**
+ * Splits one list line into its entries.
+ *
+ * The model writes a list as "door ahead, chair left". It also writes a
+ * bullet list as "- sink, straight ahead", where one line holds one entry.
+ * A colon marks a name and its position. The colon becomes a comma, because a
+ * colon is hard to hear.
+ */
+const splitListLine = (line: string): string[] => {
+  // A bullet line holds one entry, even when the entry has a comma.
+  const isBullet = /^\s*[•*–—-]/.test(line);
+  const segments = isBullet ? [line] : line.split(',');
+
+  return segments
+    .map((segment) => cleanListEntry(segment).replace(/\s*:\s*/g, ', '))
+    .filter(Boolean);
+};
+
 const translateHazardsToLanguage = (hazards: string[], language: string): string[] => {
   return hazards.map(hazard => {
     const lowerHazard = hazard.toLowerCase();
@@ -94,13 +126,9 @@ export function parseAnalysisResponse(
 
   const hazardList = /^none\b/i.test(hazardsText)
     ? []
-    : values.HAZARDS.flatMap((line) => line.split(','))
-        .map((h) => h.trim())
-        .filter(Boolean);
+    : values.HAZARDS.flatMap(splitListLine);
 
-  const objectList = values.OBJECTS.flatMap((line) => line.split(','))
-    .map((o) => o.trim())
-    .filter(Boolean);
+  const objectList = values.OBJECTS.flatMap(splitListLine);
 
   return {
     hazards:
