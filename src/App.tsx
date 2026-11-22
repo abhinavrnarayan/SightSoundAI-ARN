@@ -91,6 +91,8 @@ function App() {
   // The capture callback and the speech callback call each other. The speech
   // function is reached through this ref, so the cycle never freezes.
   const speakRef = useRef<(text: string, isCommand: boolean) => void>(() => {});
+  // The start and resume paths trigger a capture through this ref.
+  const captureRef = useRef<() => void>(() => {});
 
   const t = translations[language];
 
@@ -181,6 +183,8 @@ function App() {
     setIsPaused(false);
     isPausedRef.current = false;
     trackVoiceCommand("restart", language, true);
+    // The next analysis starts now, not after the confirmation speech ends.
+    captureRef.current();
     speak(t.restartMessage, true);
   };
 
@@ -582,6 +586,9 @@ function App() {
     }
   }, []);
 
+  // The start and resume paths reach the capture callback through this ref.
+  captureRef.current = handleCapture;
+
   // Auto-capture loop. It only runs after the user starts the app, so the
   // welcome screen never spends API calls.
   useEffect(() => {
@@ -607,6 +614,33 @@ function App() {
       }
     };
   }, [handleCapture, isStarted]);
+
+  // The first analysis must not wait for the confirmation speech to end. The
+  // camera needs a moment to produce its first frame, so the capture starts
+  // as soon as a frame is ready.
+  useEffect(() => {
+    if (!isStarted) return;
+
+    let tries = 0;
+    const timer = window.setInterval(() => {
+      tries += 1;
+      if (isCapturingRef.current) {
+        window.clearInterval(timer);
+        return;
+      }
+      // getScreenshot returns null until the camera has a frame.
+      const image = webcamRef.current ? webcamRef.current.getScreenshot() : null;
+      if (!image) {
+        // The camera has no frame yet. Keep waiting for a short time.
+        if (tries > 25) window.clearInterval(timer);
+        return;
+      }
+      window.clearInterval(timer);
+      captureRef.current();
+    }, 200);
+
+    return () => window.clearInterval(timer);
+  }, [isStarted]);
 
   // Track tab visibility changes (user switches away / back)
   useEffect(() => {
@@ -643,7 +677,10 @@ function App() {
     };
     events.forEach((name) => window.addEventListener(name, speakOnFirstPress, true));
     return () => events.forEach((name) => window.removeEventListener(name, speakOnFirstPress, true));
-  }, [isStarted, t.welcomeMessage, speak]);
+    // The speech function is declared later in this component, so it cannot
+    // sit in this dependency array.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isStarted, t.welcomeMessage]);
 
   // Keeps the live values in step with the state. The capture and speech
   // callbacks run outside the render cycle, so they read these refs.
@@ -747,8 +784,10 @@ function App() {
         return;
       }
 
-      // If we preloaded the next analysis while speaking, use it now for zero-latency transition.
-      if (!isCommand && preloadedAnalysisRef.current && !isPausedRef.current) {
+      // If we preloaded the next analysis while speaking, use it now for
+      // zero-latency transition. A command can also end here, for example the
+      // confirmation after the app starts.
+      if (preloadedAnalysisRef.current && !isPausedRef.current) {
         const preloaded = preloadedAnalysisRef.current;
         preloadedAnalysisRef.current = null;
 
